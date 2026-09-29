@@ -29,6 +29,13 @@ class AudioConfig:
     channel: int = 0
     # PortAudio block size in milliseconds (at the capture rate).
     block_ms: int = 32
+    # The listener plays the agent's audio itself (agents send it with `play`).
+    # This is what makes speech barge-in work on open speakers: the listener
+    # knows exactly what the speaker is playing, cancels it from the mic, and
+    # can duck/stop it instantly. Set false for capture-only operation.
+    playback: bool = True
+    output_device: str | int = ""
+    output_channels: int = 1
 
 
 @dataclass
@@ -51,6 +58,22 @@ class WakeConfig:
     # Optional overrides for openWakeWord's shared feature models.
     melspec_model_path: str = ""
     embedding_model_path: str = ""
+
+
+@dataclass
+class AecConfig:
+    # Echo cancellation of the listener's own playback (needs libspeexdsp:
+    # `sudo apt install libspeexdsp1`). Ignored when audio.playback is false.
+    enabled: bool = True
+    library: str = ""  # path to libspeexdsp if it isn't found automatically
+    # Longest speaker->mic delay + reverb it can model. Round-trip latency of
+    # the audio stack counts too; keep it well under this.
+    filter_ms: int = 250
+    # Suppress what the linear canceller leaves behind (uses Speex's denoiser).
+    residual_suppression: bool = True
+    noise_suppress_db: int = -10
+    # Keep cancelling this long after playback stops (echo tail).
+    hold_ms: int = 1000
 
 
 @dataclass
@@ -102,6 +125,21 @@ class BargeInConfig:
     # Also treat speech as an interruption while the agent is thinking
     # (after a transcript, before it starts speaking).
     during_thinking: bool = True
+    # Duck-and-verify (only when the listener plays the audio itself): on
+    # suspected speech, drop the playback volume by `duck_db` and keep
+    # listening. The agent's echo falls with the volume, a real voice doesn't.
+    # Playback is stopped only if speech is still there in the verify window.
+    verify: bool = True
+    duck_db: float = -20.0
+    verify_delay_ms: int = 150  # let the ducked audio reach the mic first (raised to device latency + 40)
+    verify_window_ms: int = 200
+    verify_min_fraction: float = 0.5  # of VAD frames in the window that must be speech
+    # After ducking, the mic must be at least this much louder than the echo
+    # alone would be (predicted from the speaker signal) to count as a person.
+    verify_min_excess_db: float = 6.0
+    # Speaker -> mic delay used for that prediction; 0 = device latency, or 100 ms.
+    echo_delay_ms: int = 0
+    reject_cooldown_ms: int = 700  # after a rejected suspicion, don't re-check this soon
 
 
 @dataclass
@@ -175,6 +213,7 @@ class DebugConfig:
 class Config:
     audio: AudioConfig = field(default_factory=AudioConfig)
     wake: WakeConfig = field(default_factory=WakeConfig)
+    aec: AecConfig = field(default_factory=AecConfig)
     vad: VadConfig = field(default_factory=VadConfig)
     session: SessionConfig = field(default_factory=SessionConfig)
     barge_in: BargeInConfig = field(default_factory=BargeInConfig)

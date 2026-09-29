@@ -2,6 +2,7 @@
 # STT runs in a separate whisper.cpp server built with CUDA (see README),
 # so nothing here needs CUDA or PyTorch. Install openWakeWord separately:
 #   pip install --no-deps openwakeword
+# System packages: sudo apt install libportaudio2 libspeexdsp1
 numpy
 scipy
 onnxruntime            # PyPI aarch64 CPU wheel
@@ -10,4 +11,3 @@ sounddevice            # sudo apt install libportaudio2
 scikit-learn
 tqdm
 requests
-# soxr                 # optional, only for 44.1 kHz-only mics

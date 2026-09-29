@@ -16,7 +16,6 @@ dependencies = [
 
 [project.optional-dependencies]
 desktop = ["faster-whisper>=1.1"]
-resample = ["soxr"]
 
 [project.scripts]
 voice-listener = "voice_listener.__main__:main"

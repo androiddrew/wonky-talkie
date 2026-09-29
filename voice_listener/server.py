@@ -3,8 +3,8 @@
 Clients (your agent, a debug UI, a logger) connect to ws://host:port/, receive
 a `hello` event, and then get every engine event as one JSON object per
 message. They can narrow what they receive with `subscribe`, and send commands
-(`speaking_started`, `listen`, ...) that are forwarded to the engine.
-See PROTOCOL.md for the full list.
+(`listen`, `play`, ...). Audio for the listener to play is sent as binary
+messages (16-bit mono PCM) after a `play` command. See PROTOCOL.md.
 """
 
 from __future__ import annotations
@@ -14,9 +14,12 @@ import base64
 import http
 import json
 import logging
+import time
 import uuid
 from dataclasses import dataclass, field
 from urllib.parse import parse_qs, urlparse
+
+import numpy as np
 
 from websockets.asyncio.server import ServerConnection, serve
 from websockets.exceptions import ConnectionClosed
@@ -26,16 +29,18 @@ from .engine import Engine
 
 log = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = 1
+PROTOCOL_VERSION = 2
 
 EVENT_TYPES = [
     "hello", "state_changed", "session_started", "session_ended", "wake_detected",
     "listening", "speech_started", "partial_transcript", "silence_detected",
-    "transcript", "utterance_discarded", "interruption_detected", "listen_timeout",
-    "level", "state", "pong", "subscribed", "error",
+    "transcript", "utterance_discarded", "interruption_suspected", "interruption_rejected",
+    "interruption_detected", "listen_timeout", "playback_started", "playback_finished",
+    "playback_stopped", "play_accepted", "level", "state", "pong", "subscribed", "error",
 ]
-COMMAND_TYPES = ["subscribe", "speaking_started", "speaking_ended", "listen",
-                 "end_session", "get_state", "ping"]
+COMMAND_TYPES = ["subscribe", "play", "play_end", "stop_playback", "speaking_started",
+                 "speaking_ended", "listen", "end_session", "get_state", "ping"]
+_THEN = {"listen", "end", "wait"}
 HIGH_RATE = {"level"}
 
 
@@ -45,6 +50,7 @@ class _Client:
     ws: ServerConnection
     events: set[str] | None = None  # None = everything except HIGH_RATE
     include_audio: bool = False
+    play_id: str | None = None  # item that binary audio from this client goes to
     queue: asyncio.Queue = field(default_factory=lambda: asyncio.Queue(maxsize=2000))
 
     def wants(self, type_: str) -> bool:
@@ -91,6 +97,45 @@ class EventServer:
             except asyncio.QueueFull:
                 log.warning("client %s is not reading; dropping %s", c.id, event["type"])
 
+    def _on_play_command(self, client: _Client, cmd: dict, reply) -> None:
+        player = self.engine.player
+        if player is None:
+            reply(type="error", message="playback is disabled (audio.playback = false); "
+                                        "play audio yourself and use speaking_started/speaking_ended")
+            return
+        if cmd["type"] == "play_end":
+            player.end_item(cmd.get("playback_id") or client.play_id, client.id)
+            return
+        try:
+            rate = int(cmd.get("sample_rate", 0))
+            if not 8000 <= rate <= 96000:
+                raise ValueError
+        except (TypeError, ValueError):
+            reply(type="error", message="play: sample_rate (8000-96000) is required")
+            return
+        then = cmd.get("then", "listen")
+        if then not in _THEN:
+            reply(type="error", message=f"play: then must be one of {sorted(_THEN)}")
+            return
+        pid = str(cmd.get("playback_id") or f"pb_{uuid.uuid4().hex[:8]}")
+        player.start_item(pid, rate, str(cmd.get("text", "")), then, cmd.get("timeout_s"), client.id)
+        client.play_id = pid
+        reply(type="play_accepted", playback_id=pid)
+        audio = cmd.get("audio_b64")  # optional: whole clip inline instead of binary frames
+        if audio:
+            player.add_audio(np.frombuffer(base64.b64decode(audio), dtype="<i2"), pid, client.id)
+            player.end_item(pid, client.id)
+
+    def _on_audio_frame(self, client: _Client, raw: bytes, reply) -> None:
+        player = self.engine.player
+        if player is None or client.play_id is None:
+            reply(type="error", message="binary audio needs a preceding play command")
+            return
+        if len(raw) % 2:
+            raw = raw[:-1]
+        # Returns False after a barge-in stopped the item: late audio is dropped quietly.
+        player.add_audio(np.frombuffer(raw, dtype="<i2"), client.play_id, client.id)
+
     def _check_auth(self, connection: ServerConnection, request):
         if not self.token:
             return None
@@ -112,9 +157,15 @@ class EventServer:
             while True:
                 await ws.send(await client.queue.get())
 
+        def reply(**ev):
+            client.queue.put_nowait(json.dumps({"ts": round(time.time(), 3), **ev}))
+
         writer_task = asyncio.create_task(writer())
         try:
             async for raw in ws:
+                if isinstance(raw, bytes):
+                    self._on_audio_frame(client, raw, reply)
+                    continue
                 try:
                     cmd = json.loads(raw)
                     if not isinstance(cmd, dict) or "type" not in cmd:
@@ -130,6 +181,8 @@ class EventServer:
                         "type": "subscribed",
                         "events": "default" if client.events is None else sorted(client.events),
                         "include_audio": client.include_audio}))
+                elif cmd["type"] in ("play", "play_end"):
+                    self._on_play_command(client, cmd, reply)
                 else:
                     self.engine.post_command(cmd, client.id)
         except ConnectionClosed:
@@ -145,7 +198,7 @@ class EventServer:
         self._loop = asyncio.get_running_loop()
         stop = stop or asyncio.Event()
         async with serve(self._handler, self.host, self.port, process_request=self._check_auth,
-                         max_size=2**20) as server:
+                         max_size=8 * 2**20) as server:
             self.port = next(iter(server.sockets)).getsockname()[1]  # real port if 0 was asked
             log.info("Listening for agents on ws://%s:%d", self.host, self.port)
             if started is not None:

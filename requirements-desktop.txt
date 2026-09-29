@@ -1,5 +1,6 @@
 # Desktop (x86_64, NVIDIA GPU). Install openWakeWord separately:
 #   pip install --no-deps openwakeword
+# System packages: sudo apt install libportaudio2 libspeexdsp1
 numpy
 scipy
 onnxruntime            # CPU build is enough: wake word + VAD are tiny
@@ -12,5 +13,3 @@ faster-whisper>=1.1
 # For CUDA 12 runtime libs without a system CUDA install:
 # nvidia-cublas-cu12
 # nvidia-cudnn-cu12==9.*
-# Optional, only for 44.1 kHz-only mics:
-# soxr

@@ -35,6 +35,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--print-levels", action="store_true", help="include the 10 Hz level meter when printing")
     p.add_argument("--input-file", help="read audio from a WAV file instead of the mic")
     p.add_argument("--speed", type=float, default=1.0, help="playback speed for --input-file (0 = max)")
+    p.add_argument("--simulate-echo", action="store_true",
+                   help="with --input-file: pass the listener's playback through a simulated "
+                        "speaker->room->mic echo path (to try echo handling without hardware)")
     p.add_argument("--exit-when-done", type=float, metavar="SECONDS",
                    help="with --input-file: exit this many seconds after the file ends")
     p.add_argument("--wake-at", type=float, action="append", metavar="SECONDS",
@@ -65,7 +68,8 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     # Heavy imports after arg parsing so --help and --list-devices stay fast.
-    from .audio import FileSource, MicSource
+    from .aec import EchoStage, SpeexAEC, load_speexdsp
+    from .audio import DuplexSource, EchoRoom, FileSource, MicSource, Player
     from .engine import Engine
     from .server import EventServer
     from .stt import make_backend
@@ -104,7 +108,36 @@ def main(argv: list[str] | None = None) -> int:
         if srv is not None:
             srv.publish(ev)
 
-    engine = Engine(cfg, vad, wake, stt, emit)
+    # Audio I/O. With playback on, the listener owns the speaker as well as the mic.
+    a = cfg.audio
+    player = room = None
+    if args.input_file:
+        if a.playback:
+            player = Player(16000)
+            room = EchoRoom(player, echo=args.simulate_echo)
+        source = FileSource(args.input_file, speed=args.speed, room=room)
+    elif a.playback:
+        source = DuplexSource(Player, a.device, a.output_device, a.sample_rate, a.channels,
+                              a.channel, a.output_channels, a.block_ms)
+        player = source.player
+    else:
+        source = MicSource(a.device, a.sample_rate, a.channels, a.channel, a.block_ms)
+
+    echo = None
+    if player is not None:
+        aec = None
+        if cfg.aec.enabled:
+            lib = load_speexdsp(cfg.aec.library)
+            if lib is None:
+                log.warning("libspeexdsp not found: echo cancellation OFF (sudo apt install "
+                            "libspeexdsp1). Duck-and-verify barge-in still works.")
+            else:
+                aec = SpeexAEC(lib, cfg.aec.filter_ms, cfg.aec.residual_suppression,
+                               cfg.aec.noise_suppress_db)
+                log.info("Echo cancellation on (SpeexDSP, %d ms filter)", cfg.aec.filter_ms)
+        echo = EchoStage(aec, cfg.aec.hold_ms)
+
+    engine = Engine(cfg, vad, wake, stt, emit, player=player, echo=echo)
     server = EventServer(engine, cfg.server.host, cfg.server.port, cfg.server.token)
     server_holder["server"] = server
 
@@ -128,11 +161,9 @@ def main(argv: list[str] | None = None) -> int:
                 if args.exit_when_done is not None:
                     loop.call_soon_threadsafe(loop.call_later, args.exit_when_done, stop.set)
 
-            source = FileSource(args.input_file, speed=args.speed, on_done=done)
-        else:
-            a = cfg.audio
-            source = MicSource(a.device, a.sample_rate, a.channels, a.channel, a.block_ms)
+            source.on_done = done
         source.start(engine.feed_audio)
+        engine.io_latency_ms = getattr(source, "round_trip_ms", 0)
         try:
             await stop.wait()
         finally:

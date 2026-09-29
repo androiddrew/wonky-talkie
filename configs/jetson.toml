@@ -3,8 +3,15 @@
 # whisper.cpp server built with CUDA on the same board (see README: Jetson).
 
 [audio]
-device = ""            # a USB mic array with onboard AEC makes barge-in much easier here
+device = ""            # a USB speakerphone / mic array that is also the output works best
 sample_rate = 0
+playback = true        # the listener plays the agent's audio (needed for echo-proof barge-in)
+output_device = ""     # e.g. the mic array's own output, so they share a clock
+output_channels = 1
+
+[aec]
+enabled = true         # needs libspeexdsp1
+filter_ms = 250
 
 [wake]
 models = ["hey_jarvis"]
@@ -26,6 +33,8 @@ triggers = ["speech", "wake_word"]
 vad_threshold = 0.6
 min_speech_ms = 300
 grace_ms = 300
+verify = true                        # duck-and-verify (listener playback only)
+verify_min_excess_db = 6.0
 
 [stt]
 backend = "whisper_cpp"

@@ -64,13 +64,54 @@ class Audio(unittest.TestCase):
         self.assertAlmostEqual(np.max(np.abs(seg)), 8000, delta=400)
         self.assertLess(np.max(np.abs(np.diff(seg))), 8000 * 2 * np.pi * 440 / 16000 * 1.1)
 
-    def test_resampler_rejects_441_without_soxr(self):
-        try:
-            import soxr  # noqa: F401
-            self.skipTest("soxr installed")
-        except ImportError:
-            with self.assertRaises(RuntimeError):
-                Resampler(44100)
+    def test_resampler_is_exact_for_any_ratio_and_block_split(self):
+        from scipy.signal import upfirdn
+
+        rng = np.random.default_rng(1)
+        for a, b in [(44100, 16000), (22050, 48000), (16000, 48000), (24000, 16000)]:
+            with self.subTest(ratio=f"{a}->{b}"):
+                r = Resampler(a, b)
+                x = (rng.standard_normal(a // 2) * 3000).astype(np.int16)
+                parts, i = [], 0
+                while i < len(x):
+                    n = int(rng.integers(1, 1500))
+                    parts.append(r.process(x[i : i + n]))
+                    i += n
+                y = np.concatenate(parts)
+                self.assertEqual(len(y), len(x) * b // a)
+                ref = np.clip(np.round(upfirdn(r.h, x.astype(float), r.up, r.down)), -32768, 32767)
+                np.testing.assert_array_equal(y, ref[: len(y)].astype(np.int16))
+
+
+class PlayerTest(unittest.TestCase):
+    def test_items_events_duck_and_stop(self):
+        from voice_listener.audio import Player
+
+        events = []
+        p = Player(16000, events.append)
+        self.assertFalse(p.read(160).any())
+        p.start_item("a", 16000, "hi", then="end", client="c")
+        p.add_audio(np.full(1600, 1000, np.int16), client="c")
+        out = p.read(800)
+        self.assertEqual(events[-1]["kind"], "started")
+        self.assertEqual(int(out[-1]), 1000)
+        p.duck(-20)
+        out = p.read(800)
+        self.assertEqual(int(out[-1]), 100)  # ramped down to -20 dB
+        p.end_item(client="c")
+        p.read(100)
+        fin = events[-1]
+        self.assertEqual((fin["kind"], fin["then"], fin["more"]), ("finished", "end", False))
+        self.assertAlmostEqual(fin["played_s"], 0.1, places=3)
+        p.start_item("b", 8000, client="c")  # other rates are resampled
+        p.add_audio(np.full(8000, 500, np.int16), client="c")
+        p.read(4000)
+        cut = p.stop("interrupted")
+        self.assertEqual(cut[0]["playback_id"], "b")
+        self.assertAlmostEqual(cut[0]["played_s"], 0.25, places=2)
+        self.assertIsNone(cut[0]["total_s"])  # play_end never arrived
+        self.assertFalse(p.active)
+        self.assertFalse(p.add_audio(np.ones(10, np.int16), "b", "c"))  # late audio is dropped
 
 
 class Vad(unittest.TestCase):

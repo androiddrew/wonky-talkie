@@ -12,7 +12,8 @@ States (reported in `state_changed` events):
     capturing   user is talking; recording until end-of-speech silence
     processing  utterance finished; transcription running
     waiting     transcript delivered; the agent is thinking
-    speaking    the agent says its TTS is playing; barge-in armed
+    speaking    the agent's audio is playing (the listener's own playback, or
+                the agent said `speaking_started`); barge-in armed
 
 Time is counted in samples of the 16 kHz stream (the `t` field on events).
 """
@@ -32,7 +33,8 @@ from typing import Callable
 
 import numpy as np
 
-from .audio import SAMPLE_RATE, RingBuffer, to_wav_bytes
+from .aec import EchoStage
+from .audio import SAMPLE_RATE, Player, RingBuffer, to_wav_bytes
 from .config import Config
 from .stt import SttBackend, SttResult
 from .textutil import is_hallucination, strip_wake_phrase
@@ -85,8 +87,13 @@ class SttJob:
 
 class Engine:
     def __init__(self, cfg: Config, vad: Callable[[np.ndarray], float], wake: WakeDetector,
-                 stt: SttBackend, emit: Emit):
+                 stt: SttBackend, emit: Emit, player: Player | None = None,
+                 echo: EchoStage | None = None):
         self.cfg = cfg
+        self.player = player  # listener-owned playback (None = capture only)
+        self.echo = echo  # echo cancellation of that playback (None = off)
+        if player is not None:
+            player.on_event = self.player_event
         self.vad = vad
         self.wake = wake
         self.stt = stt
@@ -107,6 +114,10 @@ class Engine:
         self.pos = 0  # samples processed by the VAD so far (the engine's clock)
 
         self._vad_buf = np.zeros(0, dtype=np.int16)
+        self._ref_buf = np.zeros(0, dtype=np.int16)  # speaker signal, aligned with _vad_buf
+        # Per VAD chunk: (start, mic energy, speaker energy), ~10 s. Used to tell the
+        # agent's echo from a person talking, and to track the noise floor.
+        self._hist: deque[tuple[int, float, float]] = deque(maxlen=320)
         self._wake_buf = np.zeros(0, dtype=np.int16)
         self._wake_pos = 0
         self._wake_block_until = 0
@@ -119,6 +130,11 @@ class Engine:
         self._speaking_since = 0
         self._speaking_text = ""
         self._waiting_since = 0
+        self._verify: dict | None = None  # duck-and-verify in progress
+        self._barge_cooldown_until = 0
+        # Mic+speaker round trip of the audio device (set by the CLI for duplex
+        # audio); the verify window starts only after ducked audio can reach the mic.
+        self.io_latency_ms = 0
 
         self._stt_busy = False
         self._stt_queue: deque[SttJob] = deque()
@@ -136,8 +152,12 @@ class Engine:
     # ------------------------------------------------------------------ API
     # These are safe to call from any thread.
 
-    def feed_audio(self, block: np.ndarray) -> None:
-        self.inbox.put(("audio", block))
+    def feed_audio(self, block: np.ndarray, ref: np.ndarray | None = None) -> None:
+        """`ref`: what the speaker played during this block (for echo cancellation)."""
+        self.inbox.put(("audio", block, ref))
+
+    def player_event(self, ev: dict) -> None:
+        self.inbox.put(("player", ev))
 
     def post_command(self, cmd: dict, client_id: str | None = None) -> None:
         self.inbox.put(("cmd", cmd, client_id))
@@ -163,7 +183,11 @@ class Engine:
             "barge_in": {
                 "enabled": self.cfg.barge_in.enabled,
                 "triggers": list(self.cfg.barge_in.triggers),
+                "verify": self.cfg.barge_in.verify and self.player is not None,
             },
+            "playback": self.player is not None,
+            "playback_rate": self.player.out_rate if self.player is not None else None,
+            "aec": self.echo is not None and self.echo.aec is not None,
         }
 
     # ------------------------------------------------------------ main loop
@@ -176,7 +200,9 @@ class Engine:
                 return
             try:
                 if kind == "audio":
-                    self._on_audio(item[1])
+                    self._on_audio(item[1], item[2])
+                elif kind == "player":
+                    self._on_player(item[1])
                 elif kind == "cmd":
                     self._on_command(item[1], item[2])
                 elif kind == "stt":
@@ -187,17 +213,27 @@ class Engine:
 
     # ---------------------------------------------------------------- audio
 
-    def _on_audio(self, block: np.ndarray) -> None:
+    def _on_audio(self, block: np.ndarray, ref: np.ndarray | None = None) -> None:
+        if ref is not None and self.echo is not None:
+            block, ref = self.echo.process(block, ref)
+            if not len(block):
+                return
+        if ref is None or len(ref) != len(block):
+            ref = np.zeros(len(block), dtype=np.int16)
         self.ring.write(block)
 
         self._vad_buf = np.concatenate([self._vad_buf, block])
+        self._ref_buf = np.concatenate([self._ref_buf, ref])
         while len(self._vad_buf) >= VAD_CHUNK:
             chunk, self._vad_buf = self._vad_buf[:VAD_CHUNK], self._vad_buf[VAD_CHUNK:]
+            rchunk, self._ref_buf = self._ref_buf[:VAD_CHUNK], self._ref_buf[VAD_CHUNK:]
             start = self.pos
             self.pos += VAD_CHUNK
             prob = self.vad(chunk)
             self._meter(chunk, prob)
-            self._on_vad(prob, start)
+            e_mic = float(np.mean(chunk.astype(np.float32) ** 2))
+            self._hist.append((start, e_mic, float(np.mean(rchunk.astype(np.float32) ** 2))))
+            self._on_vad(prob, start, e_mic)
             self._check_timers()
 
         if self.cfg.wake.enabled:
@@ -219,7 +255,7 @@ class Engine:
             self._emit("level", rms_db=round(db, 1), vad=round(self._level_vad, 3), state=self.state)
             self._level_acc, self._level_sq, self._level_vad = 0, 0.0, 0.0
 
-    def _on_vad(self, prob: float, start: int) -> None:
+    def _on_vad(self, prob: float, start: int, energy: float = 0.0) -> None:
         ev = self.endpointer.update(prob, start)
         st = self.state
 
@@ -252,14 +288,142 @@ class Engine:
                 self._begin_capture("barge_in", ev.sample, 0)
 
         elif st == SPEAKING:
-            b = self.cfg.barge_in
-            if (b.enabled and "speech" in b.triggers
-                    and start >= self._speaking_since + _samples(b.grace_ms)):
-                run_start = self.barge.update(prob, start)
-                if run_start is not None:
-                    self._emit("interruption_detected", trigger="speech", agent_state="speaking",
-                               speech_ms=_ms(self.pos - run_start))
-                    self._begin_capture("barge_in", run_start, 0)
+            self._speaking_vad(prob, start, energy)
+
+    def _player_active(self) -> bool:
+        return self.player is not None and self.player.active
+
+    def _speaking_vad(self, prob: float, start: int, energy: float) -> None:
+        """Barge-in by speech while the agent talks, with optional duck-and-verify.
+
+        Silero VAD barely cares about level (it still calls the agent's echo
+        "speech" 20 dB down), so the verdict is about energy. The listener knows
+        what the speaker played, so it can predict how loud the echo *should* be
+        after ducking: the mic energy before the duck, scaled by how much the
+        speaker energy dropped, plus the noise floor. The agent's own echo
+        matches that prediction; a person talking over it is well above it.
+        """
+        b = self.cfg.barge_in
+        if not (b.enabled and "speech" in b.triggers):
+            return
+        if start < self._speaking_since + _samples(b.grace_ms):
+            return
+
+        v = self._verify
+        if v is None:
+            if start < self._barge_cooldown_until:
+                return
+            run_start = self.barge.update(prob, start)
+            if run_start is None:
+                return
+            if b.verify and self._player_active():
+                # Suspected. Turn the agent down and see if the voice stays.
+                self._verify = {"run_start": run_start, "since": self.pos, "hits": 0, "n": 0}
+                self.player.duck(b.duck_db)
+                self._emit("interruption_suspected", speech_ms=_ms(self.pos - run_start))
+                return
+            self._confirm_barge_in("speech", run_start)
+            return
+
+        delay = max(b.verify_delay_ms, self.io_latency_ms + 40)
+        elapsed = _ms(self.pos - v["since"])
+        if elapsed <= delay:
+            return
+        v["n"] += 1
+        v["hits"] += prob >= b.vad_threshold
+        if elapsed < delay + b.verify_window_ms:
+            return
+        excess_db = self._excess_over_echo(v["run_start"], v["since"], v["since"] + _samples(delay))
+        voiced = v["hits"] / v["n"]
+        if voiced >= b.verify_min_fraction and excess_db >= b.verify_min_excess_db:
+            self._confirm_barge_in("speech", v["run_start"], excess_db=round(excess_db, 1))
+        else:  # it followed the speaker down: it was the agent's own echo
+            self._verify = None
+            self.barge.reset()
+            self._barge_cooldown_until = self.pos + _samples(b.reject_cooldown_ms)
+            if self.player is not None:
+                self.player.unduck()
+            self._emit("interruption_rejected", reason="echo", excess_db=round(excess_db, 1),
+                       voiced=round(voiced, 2))
+
+    def _excess_over_echo(self, pre_start: int, duck_at: int, post_start: int) -> float:
+        """How much louder (dB) the mic is after ducking than pure echo would be."""
+        d = _samples(self.cfg.barge_in.echo_delay_ms or self.io_latency_ms or 100)
+        spread = _samples(64)
+
+        def mean(idx: int, a: int, b: int) -> float:
+            vals = [h[idx] for h in self._hist if a <= h[0] < b]
+            return sum(vals) / len(vals) if vals else 0.0
+
+        mic_pre, mic_post = mean(1, pre_start, duck_at), mean(1, post_start, self.pos)
+        ref_pre = mean(2, pre_start - d - spread, duck_at - d)
+        ref_post = mean(2, post_start - d - spread, self.pos - d)
+        floor = float(np.percentile([h[1] for h in self._hist], 10)) if self._hist else 0.0
+        echo_post = mic_pre * (ref_post / ref_pre) if ref_pre > 0 else 0.0
+        return 10 * math.log10((mic_post + 1.0) / (echo_post + floor + 1.0))
+
+    def _confirm_barge_in(self, trigger: str, run_start: int | None, **extra) -> None:
+        """The user really is talking over the agent: stop playback, start capturing."""
+        info = self.player.current() if self.player is not None else None
+        stopped = self.player.stop("interrupted") if self.player is not None else []
+        self._verify = None
+        if run_start is not None:
+            extra["speech_ms"] = _ms(self.pos - run_start)
+        if info:
+            extra.update(playback_id=info["playback_id"], played_s=info["played_s"],
+                         total_s=info["total_s"])
+        self._emit("interruption_detected", trigger=trigger, agent_state="speaking", **extra)
+        for s in stopped:
+            self._emit("playback_stopped", **{k: v for k, v in s.items() if k != "text"})
+        if run_start is not None:
+            self._begin_capture("barge_in", run_start, 0)
+
+    def _on_player(self, ev: dict) -> None:
+        if ev["kind"] == "started":
+            if self.echo is not None:
+                self.echo.reset_stats()
+            self._emit("playback_started", playback_id=ev["id"])
+            self._enter_speaking(ev.get("text", ""))
+        elif ev["kind"] == "finished":
+            erle = self.echo.erle_db() if self.echo is not None and self.echo.aec is not None else None
+            self._emit("playback_finished", playback_id=ev["id"], played_s=ev["played_s"],
+                       **({"aec_erle_db": erle} if erle is not None else {}))
+            if ev["more"] or self.state != SPEAKING:
+                return
+            if self._verify is not None:
+                self._verify = None
+                self.player.unduck()
+            self._after_speaking(ev["then"], {"timeout_s": ev.get("timeout_s")})
+
+    def _enter_speaking(self, text: str) -> None:
+        if self.session_id is None:
+            self._start_session("agent")
+        if self.state == CAPTURING:  # agent talks over the user: close out what we have
+            self._end_utterance(self.pos, "agent_spoke")
+        self._speaking_text = text
+        if self.state != SPEAKING:  # repeated notices (e.g. per sentence) don't restart grace
+            self._speaking_since = self.pos
+            self._verify = None
+            self.barge.reset()
+            self._set_state(SPEAKING)
+
+    def _after_speaking(self, then: str, cmd: dict, reply: dict | None = None) -> None:
+        if then == "listen":
+            self._listen_command(cmd, trigger="followup")
+        elif then == "end":
+            self._end_session("agent")
+        elif then == "wait":
+            self._waiting_since = self.pos
+            self._set_state(WAITING)
+        else:
+            self._emit("error", message=f"unknown then={then!r}", **(reply or {}))
+
+    def _stop_playback(self, reason: str) -> None:
+        if self.player is None:
+            return
+        self._verify = None
+        for s in self.player.stop(reason):
+            self._emit("playback_stopped", **{k: v for k, v in s.items() if k != "text"})
 
     def _on_wake_scores(self, scores: list[tuple[str, float]], pos: int) -> None:
         if not scores or pos < self._wake_block_until:
@@ -278,9 +442,10 @@ class Engine:
         if self.session_id is None:
             self._start_session("wake_word")
         self._emit("wake_detected", model=name, score=round(score, 3))
-        if st in (WAITING, SPEAKING):
-            self._emit("interruption_detected", trigger="wake_word",
-                       agent_state="speaking" if st == SPEAKING else "thinking")
+        if st == SPEAKING:
+            self._confirm_barge_in("wake_word", None)
+        elif st == WAITING:
+            self._emit("interruption_detected", trigger="wake_word", agent_state="thinking")
         lower = pos - _samples(self.cfg.wake.command_preroll_ms)
         trigger = "barge_in" if st in (WAITING, SPEAKING) else "wake_word"
         self._enter_listening(self.cfg.session.after_wake_timeout_s, trigger, lower_bound=lower)
@@ -310,6 +475,8 @@ class Engine:
             return
         sid = self.session_id
         self.utt = None
+        if self._player_active():
+            self._stop_playback("session_ended")
         self._set_state(IDLE)
         self.session_id = None
         self.endpointer.reset()
@@ -450,15 +617,7 @@ class Engine:
         reply = {"_to": client_id} if client_id else {}
 
         if t == "speaking_started":
-            if self.session_id is None:
-                self._start_session("agent")
-            if self.state == CAPTURING:  # agent talks over the user: close out what we have
-                self._end_utterance(self.pos, "agent_spoke")
-            self._speaking_text = str(cmd.get("text", ""))
-            if self.state != SPEAKING:  # repeated notices (e.g. per sentence) don't restart grace
-                self._speaking_since = self.pos
-                self.barge.reset()
-                self._set_state(SPEAKING)
+            self._enter_speaking(str(cmd.get("text", "")))
 
         elif t == "speaking_ended":
             if self.state != SPEAKING:
@@ -466,16 +625,13 @@ class Engine:
                 # with the interruption's transcript); the late notice changes nothing.
                 log.debug("speaking_ended ignored in state %s", self.state)
                 return
-            then = cmd.get("then", "listen")
-            if then == "listen":
-                self._listen_command(cmd, trigger="followup")
-            elif then == "end":
-                self._end_session("agent")
-            elif then == "wait":
+            self._after_speaking(cmd.get("then", "listen"), cmd, reply)
+
+        elif t == "stop_playback":
+            self._stop_playback(cmd.get("reason", "client"))
+            if self.state == SPEAKING:
                 self._waiting_since = self.pos
                 self._set_state(WAITING)
-            else:
-                self._emit("error", message=f"speaking_ended: unknown then={then!r}", **reply)
 
         elif t == "listen":
             if self.state in (CAPTURING, PROCESSING):
@@ -500,7 +656,11 @@ class Engine:
             self._emit("error", message=f"unknown command {t!r}", **reply)
 
     def _listen_command(self, cmd: dict, trigger: str) -> None:
-        holdoff = _samples(self.cfg.session.post_speech_holdoff_ms) if self.state == SPEAKING else 0
+        holdoff = 0
+        if self.state == SPEAKING:
+            # "finished" means the last sample went to the device, not out of the
+            # speaker yet: wait out the device latency too.
+            holdoff = _samples(max(self.cfg.session.post_speech_holdoff_ms, self.io_latency_ms + 100))
         self._enter_listening(
             float(cmd.get("timeout_s") or self.cfg.session.followup_timeout_s),
             trigger,

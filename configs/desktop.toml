@@ -2,9 +2,15 @@
 # Every key is optional; see voice_listener/config.py for all defaults.
 
 [audio]
-device = "7"            # "" = system default input. Use the echo-cancelled source
-                       # here (see README: Echo cancellation) for speech barge-in.
-sample_rate = 0        # 0 = 16 kHz if the device allows, else resample
+device = "7"            # "" = system default input
+sample_rate = 0        # 0 = 48 kHz (or 16 kHz) duplex if the devices allow
+playback = true        # the listener plays the agent's audio (needed for echo-proof barge-in)
+output_device = ""     # "" = system default output
+output_channels = 1
+
+[aec]
+enabled = true         # needs libspeexdsp1
+filter_ms = 250
 
 [wake]
 models = ["hey_jarvis"]
@@ -22,10 +28,12 @@ max_utterance_s = 20.0
 
 [barge_in]
 enabled = true
-triggers = ["speech", "wake_word"]   # drop "speech" if you have no echo cancellation
+triggers = ["speech", "wake_word"]
 vad_threshold = 0.6
 min_speech_ms = 300
 grace_ms = 250
+verify = true                        # duck-and-verify (listener playback only)
+verify_min_excess_db = 6.0
 
 [stt]
 backend = "faster_whisper"

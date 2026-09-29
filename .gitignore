@@ -1,0 +1,31 @@
+# Python bytecode
+__pycache__/
+*.py[cod]
+
+# Virtualenvs
+.venv/
+venv/
+env/
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+# Tool caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Debug captures: [debug] save_audio_dir, one WAV per utterance
+captures/
+
+# Downloaded model weights. models/silero_vad.onnx is bundled and stays tracked;
+# openWakeWord fetches into site-packages, whisper ggml files land here by hand.
+models/*.bin
+models/ggml-*
+
+# Editors / OS
+.idea/
+.vscode/
+.DS_Store

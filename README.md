@@ -13,12 +13,13 @@ Orin with JetPack 7.2 (a whisper.cpp server built with CUDA). Only the config
 changes.
 
 ```
- mic ─▶ 16 kHz ring buffer (60 s) ─┬─▶ Silero VAD (32 ms) ──▶ endpointer ─┐
-                                   └─▶ openWakeWord (80 ms) ──────────────┤
-                                                                          ▼
-   agent(s) ◀── WebSocket events ◀── session state machine ──▶ Whisper (faster-whisper
-      │                                  ▲                     or whisper.cpp server)
-      └── speaking_started / speaking_ended / listen / end_session ──┘
+ agent ── play + PCM ──▶ player (duck / stop) ──▶ speaker
+                            │ what was played = echo reference
+                            ▼
+ mic ──▶ echo canceller ──▶ ring buffer ─┬─▶ Silero VAD ──▶ endpointer ─┐
+                                         └─▶ openWakeWord ──────────────┤
+                                                                        ▼
+ agent ◀── WebSocket events ◀──────────── session state machine ──▶ Whisper
 ```
 
 - **Wake word, then the command.** Say it in one breath ("Hey Jarvis, lights
@@ -27,11 +28,12 @@ changes.
 - **Sessions.** After a transcript the session stays open. When the agent asks
   a clarifying question it sends `speaking_ended {then: "listen"}`, and the
   user's answer is captured with no wake word. The window times out back to idle.
-- **Interruptions.** While the agent says it's speaking, sustained speech (or
-  the wake word) raises `interruption_detected` and the listener immediately
-  starts capturing what the user is saying, including the audio just before the
-  interruption was detected. Speech while the agent is still thinking counts
-  too.
+- **Interruptions.** The listener plays the agent's TTS itself, so it can
+  cancel the echo and tell the agent's voice from yours (see "Interruptions and
+  echo"). When you talk over the agent it stops the audio, raises
+  `interruption_detected`, and captures what you're saying, including the audio
+  just before the interruption was detected. Speech while the agent is still
+  thinking counts too.
 - **Pre-roll.** Utterances include ~300 ms from before speech onset, so first
   syllables aren't clipped.
 
@@ -40,7 +42,7 @@ The full event and command reference is in [PROTOCOL.md](PROTOCOL.md).
 ## Quick start: desktop (RTX 4090, Ubuntu)
 
 ```bash
-sudo apt install libportaudio2
+sudo apt install libportaudio2 libspeexdsp1
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements-desktop.txt
 pip install --no-deps openwakeword        # its Linux tflite dependency often has no wheel; we use ONNX
@@ -70,8 +72,10 @@ python -m voice_listener -c configs/desktop.toml --print-events \
 python -m voice_listener --list-devices                  # find your mic
 python -m voice_listener -c configs/desktop.toml --print-events
 # in another terminal:
-python examples/agent_client.py                          # simulated speech
-python examples/agent_client.py --tts-cmd "espeak-ng"     # real speech, interruptible
+python examples/agent_client.py                                    # simulated speech, no audio
+python examples/agent_client.py --tts-cmd "espeak-ng --stdout"     # real speech via the listener
+python examples/agent_client.py --tts-rate 22050 \
+    --tts-cmd "piper -m en_US-lessac-medium.onnx --output-raw"      # or Piper, raw PCM
 ```
 
 Say "Hey Jarvis, turn on the lights". The stub agent asks "Which room?", and
@@ -88,7 +92,7 @@ CPU-only).
 
 ```bash
 sudo nvpmodel -m 0 && sudo jetson_clocks       # max performance; avoids latency spikes
-sudo apt install -y libportaudio2 python3-venv build-essential cmake git
+sudo apt install -y libportaudio2 libspeexdsp1 python3-venv build-essential cmake git
 
 # 1. whisper.cpp with CUDA (Orin is compute capability 8.7)
 export PATH=/usr/local/cuda/bin:$PATH
@@ -121,32 +125,67 @@ the desktop and use `backend = "openai"` (commented example in
 
 ## Interruptions and echo
 
-Speech barge-in has one hard requirement: the mic must not hear the agent's own
-voice as "the user talking". Pick one of these options:
+Speech barge-in only works if the listener can tell the agent's own voice
+(coming back from the speaker) from the user talking. That's why **the listener
+plays the agent's audio itself**: the agent sends its TTS as PCM over the same
+WebSocket (`play`, binary frames, `play_end`; see PROTOCOL.md), and the
+listener:
 
-| setup | barge-in config | notes |
-|---|---|---|
-| Headset | `triggers = ["speech", "wake_word"]` | simplest; no echo at all |
-| PipeWire echo cancellation | `triggers = ["speech", "wake_word"]` | copy `scripts/pipewire/60-echo-cancel.conf`, use `ec_source` as the mic and play TTS to `ec_sink` (instructions are in the file) |
-| USB mic array with onboard AEC | `triggers = ["speech", "wake_word"]` | good fit for the Jetson; the array must also be the playback device so it has the reference signal |
-| Open speaker, no AEC | `triggers = ["wake_word"]` | say "Hey Jarvis" to interrupt; the agent's voice won't trigger it unless it says the wake word |
-| Nothing | `enabled = false` | half-duplex: the mic is ignored while the agent talks |
+1. **Cancels the echo.** SpeexDSP's echo canceller uses the exact audio sent to
+   the speaker as its reference, plus residual-echo suppression. It takes about
+   a second of agent speech to converge, and stays converged afterwards.
+2. **Ducks and verifies.** When it hears speech during playback it lowers the
+   playback volume by 20 dB for about 350 ms (`interruption_suspected`). It then
+   compares the mic level with what the agent's echo alone would be at that
+   volume. Echo follows the volume down and gets `interruption_rejected`, with
+   the volume restored. A person talking over the agent stays loud, so playback
+   stops and `interruption_detected` fires. This is what covers the
+   not-yet-converged start of the first reply, and it works even without
+   libspeexdsp.
+3. **Stops the audio itself** on a real interruption. The user's words, including
+   the ones that triggered it, are already being captured.
+
+Simulated in the tests (speaker echo 6 dB below the source, 80 ms delay,
+reverb, some distortion), the agent's echo scored at most +4 dB over the echo
+prediction. A person talking over it scored +9 to +24 dB. The threshold is 6 dB.
+
+| setup | what to do |
+|---|---|
+| Speakers (default) | agent sends audio with `play`; `sudo apt install libspeexdsp1` for echo cancellation |
+| Headset | same; there's just no echo to deal with |
+| Agent must play audio itself | `speaking_started` / `speaking_ended`, plus a headset or system AEC (`scripts/pipewire/60-echo-cancel.conf`), or `triggers = ["wake_word"]` |
+| Capture only | `audio.playback = false` |
+
+Duplex audio: with `audio.playback = true` the listener opens one full-duplex
+stream (`audio.device` in, `audio.output_device` out, default devices if
+empty). The echo canceller needs the input and output to stay in step, so the
+best setups are one device with a shared clock, or both going through
+PipeWire's default device. At startup it logs the stream latency. The
+speaker→mic round trip must stay under `aec.filter_ms` (250 ms).
+
+Check it without hardware: this plays the agent's replies through a
+simulated echoing room and feeds a recorded conversation as the mic:
+
+```bash
+python -m voice_listener -c configs/desktop.toml --print-events --simulate-echo \
+    --input-file tests/data/demo_stream.wav --wake-at 1.95 --wake-at 13.80
+python examples/agent_client.py --tts-cmd "espeak-ng --stdout"   # in another terminal
+```
 
 Tuning (`[barge_in]`):
 
-- `vad_threshold` (0.6) and `min_speech_ms` (300) are stricter than normal
-  onset, so residual echo, coughs and "mm-hm" don't cut the agent off. Raise
-  them if it's jumpy; lower them if it's slow to yield.
-- `grace_ms` (250) ignores the first moments of agent speech while echo
-  cancellation converges.
+| setting | default | meaning |
+|---|---|---|
+| `vad_threshold`, `min_speech_ms` | 0.6, 300 | speech needed to *suspect* an interruption |
+| `duck_db` | -20 | how far the agent is turned down while checking |
+| `verify_delay_ms`, `verify_window_ms` | 150, 200 | wait for the ducked audio to reach the mic (raised automatically to the device latency + 40 ms), then measure |
+| `verify_min_excess_db` | 6 | how far above the predicted echo the mic must be. Raise it if the agent still interrupts itself; lower it if it's slow to yield to you |
+| `reject_cooldown_ms` | 700 | after rejecting echo, don't check again this soon (limits volume "pumping" when there's no AEC) |
+| `grace_ms` | 250 | ignore the first moments of each reply |
 
-For the agent side:
-
-- Send `speaking_started` when audio actually starts playing, and
-  `speaking_ended` when the audio device has drained, not when synthesis
-  finishes.
-- If you stream TTS sentence by sentence, send `speaking_started` once per
-  turn.
+`interruption_rejected` / `interruption_detected` report `excess_db`, and
+`playback_finished` reports `aec_erle_db` (how much echo the canceller
+removed). Watch them with `--print-events` while you tune.
 
 ## Tuning the rest
 
@@ -166,11 +205,11 @@ For the agent side:
 ## Tests
 
 ```bash
-pip install websockets     # plus the base requirements
+pip install websockets     # plus the base requirements; libspeexdsp1 for the AEC tests
 python -m unittest discover -s tests -v
 ```
 
-The 32 tests drive the real state machine with real speech clips and the real
+The 46 tests drive the real state machine with real speech clips and the real
 Silero VAD:
 
 - wake → command in one breath or with a pause
@@ -180,7 +219,13 @@ Silero VAD:
 - grace period and half-duplex
 - speaking while the agent thinks, and continuing to talk during transcription
 - partial transcripts
-- the WebSocket protocol, including auth and audio attachments
+- the agent's echo in a simulated room (delay, reverb, distortion): no
+  self-interruption with echo cancellation plus duck-and-verify, or with either
+  one alone once it has converged; real interruptions still detected, including
+  right at the start of a reply
+- the exact streaming resampler and the player (ducking, stop, underruns)
+- the WebSocket protocol, including auth, audio attachments and `play` with
+  binary PCM
 - the HTTP STT client against a whisper.cpp stand-in
 
 ## Status: what has and hasn't been run
@@ -188,14 +233,18 @@ Silero VAD:
 Verified in a sandbox without audio hardware or model downloads:
 
 - the engine with real speech and Silero VAD
+- echo cancellation with SpeexDSP (built from source here; the system
+  `libspeexdsp1` exposes the same API) in a simulated echoing room
 - the WebSocket server
 - the HTTP STT client
-- the CLI running end to end against `examples/agent_client.py` (clarifying
-  question plus barge-in), with a stand-in whisper.cpp server
+- the CLI running end to end with `--simulate-echo` against
+  `examples/agent_client.py` streaming TTS audio (clarifying question plus
+  barge-in), with a stand-in whisper.cpp server
 
 Not run yet:
 
-- live capture through PortAudio
+- live duplex audio through PortAudio: a real room, speaker and mic (the echo
+  numbers above are from a simulated room)
 - the openWakeWord models (the scripted `--wake-at` detector stood in)
 - faster-whisper inference
 - a real whisper.cpp server
@@ -208,9 +257,10 @@ demo-stream command above, then the live mic.
 
 ```
 voice_listener/
-  engine.py     state machine: sessions, endpointing, barge-in, STT scheduling
-  server.py     WebSocket pub/sub
-  audio.py      mic/file sources, resampling, ring buffer
+  engine.py     state machine: sessions, endpointing, barge-in (duck-and-verify), STT scheduling
+  server.py     WebSocket pub/sub, play commands + binary audio
+  audio.py      duplex/mic/file sources, player, resampler, ring buffer, simulated echo room
+  aec.py        SpeexDSP echo cancellation (ctypes)
   vad.py        Silero VAD (ONNX, no torch) + endpointer
   wake.py       openWakeWord (ONNX) + null/scripted detectors
   stt.py        faster-whisper, whisper.cpp HTTP, OpenAI-compatible HTTP
