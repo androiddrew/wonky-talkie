@@ -1,0 +1,50 @@
+# Desktop with an RTX 4090: everything local, faster-whisper in-process on the GPU.
+# Every key is optional; see voice_listener/config.py for all defaults.
+
+[audio]
+device = "7"            # "" = system default input. Use the echo-cancelled source
+                       # here (see README: Echo cancellation) for speech barge-in.
+sample_rate = 0        # 0 = 16 kHz if the device allows, else resample
+
+[wake]
+models = ["hey_jarvis"]
+threshold = 0.5
+strip_phrases = ["hey jarvis", "jarvis"]
+
+[vad]
+threshold = 0.5
+end_silence_ms = 800   # pause that ends a turn; 600 is snappier, 1000 more patient
+
+[session]
+after_wake_timeout_s = 5.0
+followup_timeout_s = 8.0
+max_utterance_s = 20.0
+
+[barge_in]
+enabled = true
+triggers = ["speech", "wake_word"]   # drop "speech" if you have no echo cancellation
+vad_threshold = 0.6
+min_speech_ms = 300
+grace_ms = 250
+
+[stt]
+backend = "faster_whisper"
+language = "en"
+partials = true                     # cheap on a 4090
+partial_interval_ms = 500
+
+[stt.faster_whisper]
+model = "large-v3-turbo"
+device = "cuda"
+compute_type = "float16"
+beam_size = 5
+hotwords = ""                        # e.g. "Jarvis Kubernetes Grafana"
+
+[server]
+host = "127.0.0.1"                   # 0.0.0.0 to accept agents from other machines (set a token)
+port = 8765
+token = ""
+
+[debug]
+save_audio_dir = ""                  # e.g. "captures" to keep every utterance as WAV
+log_level = "INFO"

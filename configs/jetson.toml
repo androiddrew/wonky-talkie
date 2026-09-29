@@ -1,0 +1,54 @@
+# Jetson Orin on JetPack 7.2 (Ubuntu 24.04, Python 3.12, CUDA 13).
+# Wake word + VAD run on the CPU via onnxruntime; transcription goes to a
+# whisper.cpp server built with CUDA on the same board (see README: Jetson).
+
+[audio]
+device = ""            # a USB mic array with onboard AEC makes barge-in much easier here
+sample_rate = 0
+
+[wake]
+models = ["hey_jarvis"]
+threshold = 0.5
+strip_phrases = ["hey jarvis", "jarvis"]
+
+[vad]
+threshold = 0.5
+end_silence_ms = 800
+
+[session]
+after_wake_timeout_s = 5.0
+followup_timeout_s = 8.0
+max_utterance_s = 20.0
+
+[barge_in]
+enabled = true
+triggers = ["speech", "wake_word"]
+vad_threshold = 0.6
+min_speech_ms = 300
+grace_ms = 300
+
+[stt]
+backend = "whisper_cpp"
+language = "en"
+partials = false        # turn on once you've measured STT latency on your board
+
+[stt.http]
+url = "http://127.0.0.1:8080/inference"
+flavor = "whisper_cpp"
+timeout_s = 30
+
+# Alternative: send audio to the desktop instead (Jetson as a "satellite").
+# Run an OpenAI-compatible Whisper server there (e.g. speaches) and use:
+# [stt]
+# backend = "openai"
+# [stt.http]
+# url = "http://desktop.local:8000/v1/audio/transcriptions"
+# flavor = "openai"
+# model = "Systran/faster-whisper-large-v3"
+
+[server]
+host = "127.0.0.1"
+port = 8765
+
+[debug]
+log_level = "INFO"

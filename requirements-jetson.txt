@@ -1,0 +1,13 @@
+# Jetson Orin, JetPack 7.2 (Ubuntu 24.04, Python 3.12, aarch64).
+# STT runs in a separate whisper.cpp server built with CUDA (see README),
+# so nothing here needs CUDA or PyTorch. Install openWakeWord separately:
+#   pip install --no-deps openwakeword
+numpy
+scipy
+onnxruntime            # PyPI aarch64 CPU wheel
+websockets>=13
+sounddevice            # sudo apt install libportaudio2
+scikit-learn
+tqdm
+requests
+# soxr                 # optional, only for 44.1 kHz-only mics

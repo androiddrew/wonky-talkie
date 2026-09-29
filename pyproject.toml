@@ -1,0 +1,29 @@
+[project]
+name = "voice-listener"
+version = "0.1.0"
+description = "Always-on wake word + utterance capture + Whisper transcription, published as events to agent clients over WebSocket"
+requires-python = ">=3.11"
+dependencies = [
+  "numpy",
+  "scipy",
+  "onnxruntime",
+  "websockets>=13",
+  "sounddevice",
+  "scikit-learn",
+  "tqdm",
+  "requests",
+]
+
+[project.optional-dependencies]
+desktop = ["faster-whisper>=1.1"]
+resample = ["soxr"]
+
+[project.scripts]
+voice-listener = "voice_listener.__main__:main"
+
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["voice_listener"]

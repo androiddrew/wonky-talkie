@@ -1,0 +1,16 @@
+# Desktop (x86_64, NVIDIA GPU). Install openWakeWord separately:
+#   pip install --no-deps openwakeword
+numpy
+scipy
+onnxruntime            # CPU build is enough: wake word + VAD are tiny
+websockets>=13
+sounddevice            # needs PortAudio: sudo apt install libportaudio2
+scikit-learn           # imported by openwakeword
+tqdm
+requests
+faster-whisper>=1.1
+# For CUDA 12 runtime libs without a system CUDA install:
+# nvidia-cublas-cu12
+# nvidia-cudnn-cu12==9.*
+# Optional, only for 44.1 kHz-only mics:
+# soxr
