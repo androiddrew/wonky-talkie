@@ -12,7 +12,7 @@ import wave
 import numpy as np
 from harness import Harness, agent_voice, command, noise, wake_phrase
 
-from voice_listener.server import EventServer
+from wonky_talkie.server import EventServer
 
 try:
     from websockets.asyncio.client import connect

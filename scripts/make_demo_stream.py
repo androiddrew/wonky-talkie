@@ -2,7 +2,7 @@
 
 Lets you check the whole pipeline (VAD, endpointing, STT, your agent) without a mic:
 
-    python -m voice_listener -c configs/desktop.toml --print-events \
+    python -m wonky_talkie -c configs/desktop.toml --print-events \
         --input-file tests/data/demo_stream.wav --wake-at 1.95 --wake-at 13.80
 
 Timeline (s): 1.0 wake phrase ends 1.95 | command 2.05-4.75 | pause | reply 8.25-9.85 |

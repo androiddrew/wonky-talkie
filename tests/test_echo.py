@@ -10,7 +10,7 @@ import unittest
 
 from harness import Harness, agent_voice, command, noise, wake_phrase
 
-from voice_listener.config import Config
+from wonky_talkie.config import Config
 
 WAKE_T = 1.95
 

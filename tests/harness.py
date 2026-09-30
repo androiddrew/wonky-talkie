@@ -13,13 +13,13 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from voice_listener.aec import EchoStage, SpeexAEC, load_speexdsp  # noqa: E402
-from voice_listener.audio import SAMPLE_RATE, EchoRoom, FileSource, Player  # noqa: E402
-from voice_listener.config import Config  # noqa: E402
-from voice_listener.engine import Engine  # noqa: E402
-from voice_listener.stt import FakeBackend  # noqa: E402
-from voice_listener.vad import SileroVAD  # noqa: E402
-from voice_listener.wake import ScriptedWakeDetector  # noqa: E402
+from wonky_talkie.aec import EchoStage, SpeexAEC, load_speexdsp  # noqa: E402
+from wonky_talkie.audio import SAMPLE_RATE, EchoRoom, FileSource, Player  # noqa: E402
+from wonky_talkie.config import Config  # noqa: E402
+from wonky_talkie.engine import Engine  # noqa: E402
+from wonky_talkie.stt import FakeBackend  # noqa: E402
+from wonky_talkie.vad import SileroVAD  # noqa: E402
+from wonky_talkie.wake import ScriptedWakeDetector  # noqa: E402
 
 DATA = ROOT / "tests" / "data"
 _rng = np.random.default_rng(0)
@@ -120,6 +120,14 @@ class Harness:
         self.player.start_item(pid, SAMPLE_RATE, text, then, None, "test")
         self.player.add_audio(audio, pid, "test")
         self.player.end_item(pid, "test")
+
+    def say(self, svc, text: str, then: str = "listen", pid: str | None = None) -> str:
+        """What the server does for `say`: synthesize and queue it, then wait
+        until every chunk is in the player (playback still needs feed())."""
+        pid = svc.say(text, then=then, client="test", playback_id=pid)
+        svc.wait(pid, timeout=30)
+        self._drain()
+        return pid
 
     def command(self, cmd: dict) -> None:
         self.engine.post_command(cmd, "test")

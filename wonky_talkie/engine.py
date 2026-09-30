@@ -162,6 +162,10 @@ class Engine:
     def post_command(self, cmd: dict, client_id: str | None = None) -> None:
         self.inbox.put(("cmd", cmd, client_id))
 
+    def post_event(self, type_: str, **fields) -> None:
+        """Emit an event from another thread (the TTS worker), in engine order."""
+        self.inbox.put(("emit", type_, fields))
+
     def start(self) -> None:
         self._thread = threading.Thread(target=self._run, name="engine", daemon=True)
         self._thread.start()
@@ -207,6 +211,8 @@ class Engine:
                     self._on_command(item[1], item[2])
                 elif kind == "stt":
                     self._on_stt(item[1])
+                elif kind == "emit":
+                    self._emit(item[1], **item[2])
             except Exception as e:  # keep the listener alive whatever happens
                 log.exception("engine error")
                 self._emit("error", where=kind, message=f"{type(e).__name__}: {e}")

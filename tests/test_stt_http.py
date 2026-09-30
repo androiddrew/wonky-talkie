@@ -15,8 +15,8 @@ import numpy as np
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from voice_listener.config import SttConfig  # noqa: E402
-from voice_listener.stt import HttpBackend  # noqa: E402
+from wonky_talkie.config import SttConfig  # noqa: E402
+from wonky_talkie.stt import HttpBackend  # noqa: E402
 
 RECEIVED: dict = {}
 

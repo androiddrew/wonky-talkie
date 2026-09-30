@@ -1,26 +1,31 @@
-"""Minimal agent client for the voice listener.
+"""Minimal agent client for wonky-talkie.
 
 What an agent has to do:
   1. react to `transcript` events (the user's turn),
-  2. send its speech to the listener with `play` + binary PCM + `play_end`
-     (the listener plays it, cancels its echo, arms barge-in, and opens the
-     follow-up window afterwards if you asked for `then: "listen"`),
-  3. stop generating speech when `interruption_detected` arrives (the
-     listener has already stopped the audio).
+  2. send its reply as text with `say` (wonky-talkie synthesizes it, plays it,
+     cancels its echo, arms barge-in, and opens the follow-up window afterwards
+     if you asked for `then: "listen"`),
+  3. stop generating when `interruption_detected` arrives (the service has
+     already stopped the audio mid-sentence).
+
+Note what is *not* here: no TTS, no audio device, no PCM. The agent sends a
+string. That is the whole point of moving the voice into the service.
 
 The "brain" is a stub: replace `think()` with your LLM call.
 
-    python examples/agent_client.py                                   # simulated, no audio
-    python examples/agent_client.py --tts-cmd "espeak-ng --stdout"    # WAV on stdout
-    python examples/agent_client.py --tts-rate 22050 \\
-        --tts-cmd "piper -m en_US-lessac-medium.onnx --output-raw"      # raw PCM on stdout
+    python examples/agent_client.py              # `say`: the service speaks (default)
+    python examples/agent_client.py --simulate   # no audio at all, words printed
 
-The TTS command reads the text on stdin and writes audio (WAV, or raw 16-bit
-mono PCM at --tts-rate) to stdout; it's streamed to the listener as it arrives.
+Legacy modes, for an agent that owns its own voice (see PROTOCOL.md):
 
---local-playback keeps the old behaviour (the command plays audio itself and the
-agent sends speaking_started / speaking_ended). Speech barge-in then only works
-with a headset or system-level echo cancellation.
+    python examples/agent_client.py --tts-cmd "espeak-ng --stdout"   # `play` + PCM
+    python examples/agent_client.py --tts-cmd "espeak-ng" --local-playback
+
+`--tts-cmd` reads text on stdin and writes audio (WAV, or raw 16-bit mono PCM at
+--tts-rate) on stdout, which is streamed to the service as it arrives.
+`--local-playback` plays it in this process instead and sends
+speaking_started / speaking_ended; speech barge-in then needs a headset or
+system-level echo cancellation.
 
 Requires: pip install websockets numpy
 """
@@ -78,7 +83,16 @@ class Agent:
         self.tts_cmd = args.tts_cmd
         self.tts_rate = args.tts_rate
         self.words_per_s = args.words_per_s
-        self.listener_playback = bool(args.tts_cmd) and hello.get("playback") and not args.local_playback
+        self.tts = hello.get("tts")
+        # Prefer `say`: the service owns the voice, so it can cut itself off.
+        if not args.simulate and not args.tts_cmd and self.tts and hello.get("playback"):
+            self.mode = "say"
+        elif args.tts_cmd and hello.get("playback") and not args.local_playback:
+            self.mode = "play"
+        elif args.tts_cmd:
+            self.mode = "local"
+        else:
+            self.mode = "simulated"
         self.history: list[dict] = []
         self.turn: asyncio.Task | None = None
         self._midline = False  # simulated speech is printed word by word
@@ -109,6 +123,10 @@ class Agent:
                 detail = f"{detail} (voice {ev['excess_db']:+.1f} dB over echo)"
             print(f"<- {t:<22} {detail}", flush=True)
 
+        if t == "tts_failed":
+            print(f"!! the service could not speak: {ev.get('message')}", flush=True)
+            return
+
         if t == "transcript":
             if self.turn and not self.turn.done():
                 self.turn.cancel()
@@ -133,14 +151,19 @@ class Agent:
         reply, expects_reply = await think(self.history)
         self.history.append({"role": "assistant", "content": reply})
         then = "listen" if expects_reply else "end"
-        if self.listener_playback:
-            await self.speak_via_listener(reply, then)  # the listener applies `then`
+        if self.mode == "say":
+            # The whole reply is one command; the service applies `then`.
+            print(f"-> {reply}", flush=True)
+            await self.send(type="say", text=reply, then=then)
+            return
+        if self.mode == "play":
+            await self.speak_via_service(reply, then)  # the service applies `then`
             return
         await self.send(type="speaking_started", text=reply)
         await self.speak_locally(reply)
         await self.send(type="speaking_ended", then=then)
 
-    async def speak_via_listener(self, text: str, then: str) -> None:
+    async def speak_via_service(self, text: str, then: str) -> None:
         print(f"-> {text}", flush=True)
         proc = await asyncio.create_subprocess_shell(
             self.tts_cmd, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
@@ -201,7 +224,10 @@ def _kill(proc) -> None:
 async def main() -> None:
     p = argparse.ArgumentParser()
     p.add_argument("--url", default="ws://127.0.0.1:8765/")
-    p.add_argument("--tts-cmd", help="shell command: text on stdin -> WAV or raw PCM on stdout")
+    p.add_argument("--simulate", action="store_true",
+                   help="don't make any sound; print the reply word by word")
+    p.add_argument("--tts-cmd", help="legacy: synthesize here instead of in the service "
+                                     "(text on stdin -> WAV or raw PCM on stdout)")
     p.add_argument("--tts-rate", type=int, default=22050, help="sample rate of raw PCM output")
     p.add_argument("--local-playback", action="store_true",
                    help="the TTS command plays audio itself (old mode, no echo cancellation)")
@@ -210,10 +236,15 @@ async def main() -> None:
     async with connect(args.url) as ws:
         hello = json.loads(await ws.recv())
         agent = Agent(ws, hello, args)
-        mode = "listener playback" if agent.listener_playback else \
-            ("local playback" if args.tts_cmd else "simulated speech")
+        mode = {"say": "say (the service speaks)", "play": "play (this agent synthesizes)",
+                "local": "local playback (legacy)", "simulated": "simulated speech"}[agent.mode]
+        tts = hello.get("tts") or {}
+        voice = f" voice={tts.get('voice')}" if tts.get("voice") else ""
         print(f"connected: state={hello['state']} wake={hello['wake_models']} "
-              f"stt={hello['stt_backend']} aec={hello.get('aec')} mode={mode}")
+              f"stt={hello['stt_backend']} tts={tts.get('backend')}{voice} "
+              f"aec={hello.get('aec')} mode={mode}")
+        if agent.mode == "simulated" and not args.simulate:
+            print("note: no TTS in the service and no --tts-cmd, so nothing will be audible.")
         await agent.run()
 
 

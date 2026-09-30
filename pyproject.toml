@@ -1,7 +1,7 @@
 [project]
-name = "voice-listener"
+name = "wonky-talkie"
 version = "0.1.0"
-description = "Always-on wake word + utterance capture + Whisper transcription, published as events to agent clients over WebSocket"
+description = "Always-on voice I/O for an agent: wake word, utterance capture, Whisper transcription and speech synthesis, published as events to agent clients over WebSocket"
 requires-python = ">=3.11"
 dependencies = [
   "numpy",
@@ -16,13 +16,22 @@ dependencies = [
 
 [project.optional-dependencies]
 desktop = ["faster-whisper>=1.1"]
+# KittenTTS is a direct wheel reference. `spacy<4` matters: without it pip
+# backtracks to spacy 4.0.0.dev3 -> thinc 9 -> blis, which has no 3.13 wheel.
+# misaki 0.9.4's published metadata also still says python <3.13, so it needs
+# --ignore-requires-python; see README. The other TTS backends have no Python deps.
+kitten = [
+  "kittentts @ https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl",
+  "spacy<4",
+  "soundfile",
+]
 
 [project.scripts]
-voice-listener = "voice_listener.__main__:main"
+wonky-talkie = "wonky_talkie.__main__:main"
 
 [build-system]
 requires = ["setuptools>=64"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools]
-packages = ["voice_listener"]
+packages = ["wonky_talkie"]

@@ -13,3 +13,18 @@ faster-whisper>=1.1
 # For CUDA 12 runtime libs without a system CUDA install:
 # nvidia-cublas-cu12
 # nvidia-cudnn-cu12==9.*
+
+# --- Text to speech -------------------------------------------------------
+# Default backend is KittenTTS. Do NOT `pip install` its wheel on its own: the
+# published misaki metadata still says python <3.13 (upstream has raised it to
+# <3.14), and pip then backtracks onto spacy 4.0.0.dev3 -> thinc 9 -> blis,
+# which has no 3.13 wheel and fails to compile. This works on 3.11-3.13:
+#   pip install --no-deps --ignore-requires-python "misaki==0.9.4"
+#   pip install addict regex num2words "spacy<4" phonemizer-fork espeakng-loader soundfile
+#   pip install --no-deps https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl
+# --no-deps on the wheel also avoids torch + transformers, which misaki[en]
+# would pull in and nothing here uses.
+# Also: sudo apt install espeak-ng   (the bundled espeak data is broken)
+#
+# Needs nothing extra: tts.backend = "command" (e.g. espeak-ng --stdout),
+# "piper" (the piper binary), or "openai" (an HTTP server).

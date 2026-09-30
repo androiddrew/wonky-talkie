@@ -19,7 +19,7 @@ PACKAGE_ROOT = Path(__file__).resolve().parent.parent
 @dataclass
 class AudioConfig:
     # Input device: "" = system default, an integer index, or a substring of the
-    # device name (see `python -m voice_listener --list-devices`).
+    # device name (see `python -m wonky_talkie --list-devices`).
     device: str | int = ""
     # 0 = try 16 kHz first, fall back to the device's default rate and resample.
     sample_rate: int = 0
@@ -192,6 +192,72 @@ class SttConfig:
 
 
 @dataclass
+class KittenTtsConfig:
+    # KittenML/kitten-tts-mini-0.8 (80 MB) | micro-0.8 (41) | nano-0.8 (56) | nano-0.8-int8 (25)
+    model: str = "KittenML/kitten-tts-mini-0.8"
+    # Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo, or a raw expr-voice-N-m/f.
+    voice: str = "expr-voice-5-m"
+    speed: float = 1.0
+    # Expand numbers, currency, URLs etc. into words before phonemizing.
+    clean_text: bool = True
+    sample_rate: int = 24000  # what the model emits; don't change it
+    cache_dir: str = ""       # "" = the default Hugging Face cache
+    # KittenTTS ships an espeak-ng whose bundled data path is broken (it points
+    # into the CI build dir), so we point phonemizer at the system library.
+    # "" = auto-detect; set a path to override, "off" to trust the bundle.
+    espeak_library: str = ""
+
+
+@dataclass
+class PiperTtsConfig:
+    binary: str = "piper"
+    model: str = ""           # path to a .onnx voice
+    speaker: str = ""         # multi-speaker voices only
+    sample_rate: int = 22050  # most piper voices; a WAV header wins over this
+    extra_args: str = ""
+    timeout_s: float = 30.0
+
+
+@dataclass
+class CommandTtsConfig:
+    # Text on stdin -> WAV or raw int16 on stdout, e.g. "espeak-ng --stdout".
+    command: str = ""
+    sample_rate: int = 22050  # used only when the output has no WAV header
+    timeout_s: float = 30.0
+
+
+@dataclass
+class HttpTtsConfig:
+    url: str = "http://127.0.0.1:8880/v1/audio/speech"
+    model: str = "tts-1"
+    voice: str = "alloy"
+    speed: float = 1.0
+    response_format: str = "wav"
+    api_key: str = ""
+    sample_rate: int = 24000  # used only when the reply has no WAV header
+    timeout_s: float = 30.0
+
+
+@dataclass
+class TtsConfig:
+    # kitten | piper | command | openai | none ("none" = agents must send `play`)
+    backend: str = "kitten"
+    # Long replies are synthesized sentence by sentence so the first words reach
+    # the speaker sooner and an interruption wastes less work. The first chunk is
+    # your reply latency: measured against KittenTTS (~0.07 s per character on a
+    # desktop CPU), 48 characters is about 1.5 s before the first word is heard.
+    first_chunk_chars: int = 48
+    max_chars: int = 320
+    # Synthesize one warmup utterance at startup (loads the model, JITs the ONNX
+    # graph) so the first real reply isn't slow.
+    warmup: bool = True
+    kitten: KittenTtsConfig = field(default_factory=KittenTtsConfig)
+    piper: PiperTtsConfig = field(default_factory=PiperTtsConfig)
+    command: CommandTtsConfig = field(default_factory=CommandTtsConfig)
+    http: HttpTtsConfig = field(default_factory=HttpTtsConfig)
+
+
+@dataclass
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8765
@@ -218,6 +284,7 @@ class Config:
     session: SessionConfig = field(default_factory=SessionConfig)
     barge_in: BargeInConfig = field(default_factory=BargeInConfig)
     stt: SttConfig = field(default_factory=SttConfig)
+    tts: TtsConfig = field(default_factory=TtsConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 
@@ -258,6 +325,10 @@ def load_config(path: str | Path | None) -> Config:
 def validate(cfg: Config) -> None:
     if cfg.stt.backend not in {"faster_whisper", "whisper_cpp", "openai", "none"}:
         raise ValueError(f"stt.backend must be faster_whisper, whisper_cpp, openai or none, not {cfg.stt.backend!r}")
+    if cfg.tts.backend not in {"kitten", "piper", "command", "openai", "none"}:
+        raise ValueError(f"tts.backend must be kitten, piper, command, openai or none, not {cfg.tts.backend!r}")
+    if cfg.tts.max_chars < 1 or cfg.tts.first_chunk_chars < 1:
+        raise ValueError("tts.max_chars and tts.first_chunk_chars must be >= 1")
     bad = set(cfg.barge_in.triggers) - {"speech", "wake_word"}
     if bad:
         raise ValueError(f"barge_in.triggers has unknown entries: {sorted(bad)}")

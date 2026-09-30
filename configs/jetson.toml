@@ -5,7 +5,7 @@
 [audio]
 device = ""            # a USB speakerphone / mic array that is also the output works best
 sample_rate = 0
-playback = true        # the listener plays the agent's audio (needed for echo-proof barge-in)
+playback = true        # wonky-talkie owns the speaker (needed for echo-proof barge-in)
 output_device = ""     # e.g. the mic array's own output, so they share a clock
 output_channels = 1
 
@@ -33,7 +33,7 @@ triggers = ["speech", "wake_word"]
 vad_threshold = 0.6
 min_speech_ms = 300
 grace_ms = 300
-verify = true                        # duck-and-verify (listener playback only)
+verify = true                        # duck-and-verify (needs our own playback)
 verify_min_excess_db = 6.0
 
 [stt]
@@ -54,6 +54,27 @@ timeout_s = 30
 # url = "http://desktop.local:8000/v1/audio/transcriptions"
 # flavor = "openai"
 # model = "Systran/faster-whisper-large-v3"
+
+[tts]
+# KittenTTS is CPU-only and small, so it costs the Orin almost nothing and
+# leaves the GPU to whisper.cpp.
+backend = "kitten"
+first_chunk_chars = 100              # a little shorter: the Orin synthesizes slower
+max_chars = 280
+warmup = true
+
+[tts.kitten]
+model = "KittenML/kitten-tts-nano-0.8"   # 56 MB; mini-0.8 sounds better if you have room
+voice = "expr-voice-5-m"
+speed = 1.0
+
+# Alternative: borrow the desktop's voice (Jetson as a "satellite"), matching
+# the [stt] openai option below.
+# [tts]
+# backend = "openai"
+# [tts.http]
+# url = "http://desktop.local:8880/v1/audio/speech"
+# voice = "alloy"
 
 [server]
 host = "127.0.0.1"

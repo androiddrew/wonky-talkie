@@ -1,4 +1,4 @@
-"""Command line entry point: python -m voice_listener --config configs/desktop.toml"""
+"""Command line entry point: python -m wonky_talkie --config configs/desktop.toml"""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ import time
 
 from .config import load_config
 
-log = logging.getLogger("voice_listener")
+log = logging.getLogger("wonky_talkie")
 
 
 def _print_event(ev: dict) -> None:
@@ -22,8 +22,25 @@ def _print_event(ev: dict) -> None:
     print(f"[{ev['t']:8.2f}] {ev['type']:<22} {json.dumps(fields, ensure_ascii=False)}", flush=True)
 
 
+def _say_once(cfg, text: str, make_tts_backend) -> int:
+    """--say: synthesize one line and play it with no mic, server or engine."""
+    import numpy as np
+    import sounddevice as sd
+
+    backend = make_tts_backend(cfg.tts)
+    t0 = time.monotonic()
+    pcm = backend.synth(text)
+    dur = len(pcm) / backend.sample_rate
+    wall = time.monotonic() - t0
+    log.info("%s: %.2fs of audio in %.2fs (%.1fx realtime) at %d Hz",
+             backend.name, dur, wall, dur / wall if wall else 0.0, backend.sample_rate)
+    device = cfg.audio.output_device or None
+    sd.play(np.asarray(pcm), backend.sample_rate, device=device, blocking=True)
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(prog="voice_listener", description=__doc__)
+    p = argparse.ArgumentParser(prog="wonky_talkie", description=__doc__)
     p.add_argument("--config", "-c", help="TOML config (see configs/)")
     p.add_argument("--list-devices", action="store_true", help="list audio devices and exit")
     p.add_argument("--host", help="override server.host")
@@ -31,6 +48,11 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--device", help="override audio.device")
     p.add_argument("--stt-backend", choices=["faster_whisper", "whisper_cpp", "openai", "none"],
                    help="override stt.backend")
+    p.add_argument("--tts-backend", choices=["kitten", "piper", "command", "openai", "none"],
+                   help="override tts.backend")
+    p.add_argument("--voice", help="override the backend's voice (tts.<backend>.voice)")
+    p.add_argument("--say", metavar="TEXT",
+                   help="speak this once at startup and exit (to check TTS on its own)")
     p.add_argument("--print-events", action="store_true", help="also print events to stdout")
     p.add_argument("--print-levels", action="store_true", help="include the 10 Hz level meter when printing")
     p.add_argument("--input-file", help="read audio from a WAV file instead of the mic")
@@ -61,6 +83,12 @@ def main(argv: list[str] | None = None) -> int:
         cfg.audio.device = args.device
     if args.stt_backend:
         cfg.stt.backend = args.stt_backend
+    if args.tts_backend:
+        cfg.tts.backend = args.tts_backend
+    if args.voice:
+        for section in (cfg.tts.kitten, cfg.tts.http):
+            if hasattr(section, "voice"):
+                section.voice = args.voice
     logging.basicConfig(
         level=(args.log_level or cfg.debug.log_level).upper(),
         format="%(asctime)s %(levelname)-7s %(name)s: %(message)s",
@@ -73,6 +101,7 @@ def main(argv: list[str] | None = None) -> int:
     from .engine import Engine
     from .server import EventServer
     from .stt import make_backend
+    from .tts import TtsService, make_backend as make_tts_backend
     from .vad import SileroVAD
     from .wake import NullWakeDetector, OpenWakeWordDetector, ScriptedWakeDetector
 
@@ -98,6 +127,9 @@ def main(argv: list[str] | None = None) -> int:
     except Exception as e:
         log.warning("STT warm-up failed (%s); will retry on first utterance", e)
     log.info("STT backend %s ready in %.1fs", stt.name, time.monotonic() - t0)
+
+    if args.say:
+        return _say_once(cfg, args.say, make_tts_backend)
 
     server_holder: dict = {}
 
@@ -138,7 +170,27 @@ def main(argv: list[str] | None = None) -> int:
         echo = EchoStage(aec, cfg.aec.hold_ms)
 
     engine = Engine(cfg, vad, wake, stt, emit, player=player, echo=echo)
-    server = EventServer(engine, cfg.server.host, cfg.server.port, cfg.server.token)
+
+    # In-process TTS: wonky-talkie speaks, so it owns the reference signal that
+    # echo cancellation and duck-and-verify barge-in depend on.
+    tts_service = None
+    if player is not None and cfg.tts.backend != "none":
+        t0 = time.monotonic()
+        try:
+            tts_backend = make_tts_backend(cfg.tts)
+            if cfg.tts.warmup:
+                tts_backend.warmup()
+            tts_service = TtsService(cfg.tts, tts_backend, player, emit=engine.post_event)
+            log.info("TTS backend %s ready in %.1fs (%d Hz)", tts_backend.name,
+                     time.monotonic() - t0, tts_backend.sample_rate)
+        except Exception as e:
+            log.error("TTS unavailable (%s); `say` will be refused, `play` still works", e)
+    elif cfg.tts.backend != "none":
+        log.warning("audio.playback is false, so there is no speaker to synthesize to; "
+                    "`say` will be refused")
+
+    server = EventServer(engine, cfg.server.host, cfg.server.port, cfg.server.token,
+                         tts=tts_service)
     server_holder["server"] = server
 
     async def run() -> None:

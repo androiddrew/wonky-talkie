@@ -1,10 +1,10 @@
 # Desktop with an RTX 4090: everything local, faster-whisper in-process on the GPU.
-# Every key is optional; see voice_listener/config.py for all defaults.
+# Every key is optional; see wonky_talkie/config.py for all defaults.
 
 [audio]
 device = "7"            # "" = system default input
 sample_rate = 0        # 0 = 48 kHz (or 16 kHz) duplex if the devices allow
-playback = true        # the listener plays the agent's audio (needed for echo-proof barge-in)
+playback = true        # wonky-talkie owns the speaker (needed for echo-proof barge-in)
 output_device = ""     # "" = system default output
 output_channels = 1
 
@@ -32,7 +32,7 @@ triggers = ["speech", "wake_word"]
 vad_threshold = 0.6
 min_speech_ms = 300
 grace_ms = 250
-verify = true                        # duck-and-verify (listener playback only)
+verify = true                        # duck-and-verify (needs our own playback)
 verify_min_excess_db = 6.0
 
 [stt]
@@ -47,6 +47,25 @@ device = "cuda"
 compute_type = "float16"
 beam_size = 5
 hotwords = ""                        # e.g. "Jarvis Kubernetes Grafana"
+
+[tts]
+# wonky-talkie speaks: the agent sends `say` with text and we synthesize it.
+# kitten | piper | command | openai | none ("none" = agents must send `play`)
+backend = "kitten"
+first_chunk_chars = 120              # keep the first sentence short: it sets reply latency
+max_chars = 320
+warmup = true
+
+[tts.kitten]
+model = "KittenML/kitten-tts-mini-0.8"   # micro-0.8 / nano-0.8 / nano-0.8-int8 are smaller
+voice = "expr-voice-5-m"                 # or Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo
+speed = 1.0
+
+# No-dependency fallback if KittenTTS won't install (e.g. on Python 3.13):
+# [tts]
+# backend = "command"
+# [tts.command]
+# command = "espeak-ng --stdout"
 
 [server]
 host = "127.0.0.1"                   # 0.0.0.0 to accept agents from other machines (set a token)

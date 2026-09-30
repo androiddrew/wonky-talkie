@@ -34,7 +34,7 @@ _I16P = ctypes.POINTER(ctypes.c_int16)
 
 
 def load_speexdsp(path: str = "") -> ctypes.CDLL | None:
-    candidates = [path, os.environ.get("VOICE_LISTENER_SPEEXDSP", ""),
+    candidates = [path, os.environ.get("WONKY_TALKIE_SPEEXDSP", ""),
                   ctypes.util.find_library("speexdsp") or "",
                   "libspeexdsp.so.1", "libspeexdsp.so", "libspeexdsp.dylib"]
     for c in candidates:

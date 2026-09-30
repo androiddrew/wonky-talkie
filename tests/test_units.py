@@ -7,10 +7,10 @@ import numpy as np
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from voice_listener.audio import SAMPLE_RATE, Resampler, RingBuffer  # noqa: E402
-from voice_listener.config import load_config  # noqa: E402
-from voice_listener.textutil import is_hallucination, strip_wake_phrase  # noqa: E402
-from voice_listener.vad import Endpointer, SileroVAD  # noqa: E402
+from wonky_talkie.audio import SAMPLE_RATE, Resampler, RingBuffer  # noqa: E402
+from wonky_talkie.config import load_config  # noqa: E402
+from wonky_talkie.textutil import is_hallucination, strip_wake_phrase  # noqa: E402
+from wonky_talkie.vad import Endpointer, SileroVAD  # noqa: E402
 
 PHRASES = ["hey jarvis", "jarvis"]
 
@@ -85,7 +85,7 @@ class Audio(unittest.TestCase):
 
 class PlayerTest(unittest.TestCase):
     def test_items_events_duck_and_stop(self):
-        from voice_listener.audio import Player
+        from wonky_talkie.audio import Player
 
         events = []
         p = Player(16000, events.append)

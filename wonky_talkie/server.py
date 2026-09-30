@@ -29,16 +29,17 @@ from .engine import Engine
 
 log = logging.getLogger(__name__)
 
-PROTOCOL_VERSION = 2
+PROTOCOL_VERSION = 3
 
 EVENT_TYPES = [
     "hello", "state_changed", "session_started", "session_ended", "wake_detected",
     "listening", "speech_started", "partial_transcript", "silence_detected",
     "transcript", "utterance_discarded", "interruption_suspected", "interruption_rejected",
     "interruption_detected", "listen_timeout", "playback_started", "playback_finished",
-    "playback_stopped", "play_accepted", "level", "state", "pong", "subscribed", "error",
+    "playback_stopped", "play_accepted", "say_accepted", "tts_failed",
+    "level", "state", "pong", "subscribed", "error",
 ]
-COMMAND_TYPES = ["subscribe", "play", "play_end", "stop_playback", "speaking_started",
+COMMAND_TYPES = ["subscribe", "say", "play", "play_end", "stop_playback", "speaking_started",
                  "speaking_ended", "listen", "end_session", "get_state", "ping"]
 _THEN = {"listen", "end", "wait"}
 HIGH_RATE = {"level"}
@@ -60,8 +61,10 @@ class _Client:
 
 
 class EventServer:
-    def __init__(self, engine: Engine, host: str = "127.0.0.1", port: int = 8765, token: str = ""):
+    def __init__(self, engine: Engine, host: str = "127.0.0.1", port: int = 8765, token: str = "",
+                 tts: "TtsService | None" = None):
         self.engine = engine
+        self.tts = tts  # None = no in-process TTS; agents must send `play`
         self.host, self.port, self.token = host, port, token
         self._clients: dict[str, _Client] = {}
         self._loop: asyncio.AbstractEventLoop | None = None
@@ -96,6 +99,28 @@ class EventServer:
                 c.queue.put_nowait(msg)
             except asyncio.QueueFull:
                 log.warning("client %s is not reading; dropping %s", c.id, event["type"])
+
+    def _on_say_command(self, client: _Client, cmd: dict, reply) -> None:
+        """`say`: we synthesize the text and play it ourselves."""
+        if self.engine.player is None:
+            reply(type="error", message="playback is disabled (audio.playback = false); "
+                                        "play audio yourself and use speaking_started/speaking_ended")
+            return
+        if self.tts is None:
+            reply(type="error", message="no TTS backend (tts.backend = \"none\"); "
+                                        "send `play` with your own audio instead")
+            return
+        text = str(cmd.get("text", "")).strip()
+        if not text:
+            reply(type="error", message="say: text is required")
+            return
+        then = cmd.get("then", "listen")
+        if then not in _THEN:
+            reply(type="error", message=f"say: then must be one of {sorted(_THEN)}")
+            return
+        pid = self.tts.say(text, then, cmd.get("timeout_s"), client.id, cmd.get("playback_id"))
+        client.play_id = pid
+        reply(type="say_accepted", playback_id=pid, **self.tts.info)
 
     def _on_play_command(self, client: _Client, cmd: dict, reply) -> None:
         player = self.engine.player
@@ -150,7 +175,8 @@ class EventServer:
         self._clients[client.id] = client
         log.info("client %s connected from %s", client.id, ws.remote_address)
         hello = {"type": "hello", "protocol": PROTOCOL_VERSION, "client_id": client.id,
-                 **self.engine.snapshot(), "events": EVENT_TYPES, "commands": COMMAND_TYPES}
+                 **self.engine.snapshot(), "events": EVENT_TYPES, "commands": COMMAND_TYPES,
+                 "tts": self.tts.info if self.tts is not None else None}
         await ws.send(json.dumps(hello))
 
         async def writer():
@@ -181,6 +207,8 @@ class EventServer:
                         "type": "subscribed",
                         "events": "default" if client.events is None else sorted(client.events),
                         "include_audio": client.include_audio}))
+                elif cmd["type"] == "say":
+                    self._on_say_command(client, cmd, reply)
                 elif cmd["type"] in ("play", "play_end"):
                     self._on_play_command(client, cmd, reply)
                 else:

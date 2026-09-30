@@ -7,7 +7,7 @@ import unittest
 
 from harness import Harness, command, noise, short_reply, wake_phrase
 
-from voice_listener.config import Config
+from wonky_talkie.config import Config
 
 WAKE_T = 1.95  # end of the wake phrase in the streams below
 
