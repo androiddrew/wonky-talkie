@@ -1,0 +1,4 @@
+# CPU install: every model runs on the CPU. Nothing NVIDIA is needed.
+#   make setup-cpu      (recommended; also installs openWakeWord and KittenTTS)
+-r requirements-base.txt
+onnxruntime

@@ -1,0 +1,15 @@
+# Shared by both installs. Don't install this directly: use
+#   requirements-cpu.txt  - every model on the CPU
+#   requirements-gpu.txt  - every model on an NVIDIA GPU
+# or just `make setup-cpu` / `make setup-gpu`, which also handle the steps a
+# requirements file can't express (openWakeWord, KittenTTS, the onnxruntime swap).
+#
+# System packages: sudo apt install libportaudio2 libspeexdsp1 espeak-ng
+numpy
+scipy
+websockets>=13
+sounddevice            # needs PortAudio: sudo apt install libportaudio2
+scikit-learn           # imported by openwakeword
+tqdm
+requests
+faster-whisper>=1.1    # Whisper on CTranslate2: int8 on a CPU, float16 on a GPU

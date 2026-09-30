@@ -6,7 +6,6 @@ requires-python = ">=3.11"
 dependencies = [
   "numpy",
   "scipy",
-  "onnxruntime",
   "websockets>=13",
   "sounddevice",
   "scikit-learn",
@@ -15,6 +14,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# Pick exactly one of cpu / gpu: they install into the same onnxruntime/ dir.
+# faster-whisper (desktop) depends on the CPU onnxruntime, so a gpu install also
+# needs `make onnx-runtime PROFILE=gpu` afterwards; `make setup-gpu` does it all.
+cpu = ["onnxruntime"]
+gpu = ["onnxruntime-gpu[cuda,cudnn]>=1.26,<1.27", "nvidia-cublas-cu12"]
 desktop = ["faster-whisper>=1.1"]
 # KittenTTS is a direct wheel reference. `spacy<4` matters: without it pip
 # backtracks to spacy 4.0.0.dev3 -> thinc 9 -> blis, which has no 3.13 wheel.

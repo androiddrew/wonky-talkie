@@ -1,0 +1,35 @@
+# The config baked into both Docker images. The same file serves the CPU and the
+# CUDA image: [compute] device = "auto" follows the install, and Whisper's model
+# and precision follow the device.
+
+[audio]
+device = ""            # ALSA default, which the image routes to the host's PulseAudio/PipeWire
+output_device = ""
+playback = true        # wonky-talkie owns the speaker (needed for echo-proof barge-in)
+
+[wake]
+models = ["hey_jarvis"]
+strip_phrases = ["hey jarvis", "jarvis"]
+
+[stt]
+backend = "faster_whisper"
+
+[stt.faster_whisper]
+model = "auto"                  # large-v3-turbo on a GPU, small.en on a CPU
+compute_type = "auto"           # float16 on a GPU, int8 on a CPU
+download_root = "/cache/whisper"  # a volume, so Whisper downloads once, not every run
+
+[tts]
+backend = "kitten"
+
+[tts.kitten]
+model = "KittenML/kitten-tts-nano-0.8"   # baked into the image
+voice = "expr-voice-5-m"                 # = Leo; Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki
+speed = 1.0
+
+[compute]
+device = "auto"
+
+[server]
+host = "0.0.0.0"       # inside the container; publish it with -p 8765:8765
+port = 8765

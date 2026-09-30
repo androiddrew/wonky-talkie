@@ -5,7 +5,8 @@ own output device. That is what keeps barge-in honest: because the service owns
 both the speaker and the synthesizer, it has the exact playback reference for
 echo cancellation and it can stop mid-sentence without asking anyone.
 
-- kitten:  KittenTTS (ONNX, CPU, ~25-80 MB). The default. Verified on 3.13; see
+- kitten:  KittenTTS (ONNX, ~25-80 MB), on the CPU or GPU per [compute]. The
+           default. Verified on 3.13; see
            INSTALL_HINT for why it needs constraints rather than a plain install.
 - piper:   the `piper` binary, raw PCM on stdout. No Python deps.
 - command: any shell command, text on stdin -> WAV or raw PCM on stdout
@@ -232,12 +233,17 @@ class TtsBackend(Protocol):
 
 
 class KittenBackend:
-    """KittenTTS: a 15M-parameter ONNX model, fast enough on CPU to stay ahead
-    of playback, which leaves the GPU entirely to Whisper and the agent."""
+    """KittenTTS: small ONNX voices, on whichever device [compute] chose.
+
+    Only nano-0.8 actually runs on a GPU: the other models are int8-quantized
+    with MatMulInteger, which ONNX Runtime has no CUDA kernel for, so their heavy
+    layers stay on the CPU whatever the session says (use_providers can't see
+    that; it's per node). nano-0.8 is also the fastest on a CPU.
+    """
 
     name = "kitten"
 
-    def __init__(self, cfg: TtsConfig):
+    def __init__(self, cfg: TtsConfig, compute=None):
         try:
             from kittentts import KittenTTS  # imports misaki, which pins espeak
         except ImportError as e:
@@ -257,6 +263,11 @@ class KittenBackend:
         # KittenTTS prints on every generate(); stdout carries our JSON events.
         with redirect_stdout(io.StringIO()):
             self.model = KittenTTS(k.model, cache_dir=k.cache_dir or None)
+        # KittenTTS builds its session with no providers argument, which means
+        # "whatever this onnxruntime prefers". Choose explicitly instead.
+        from .compute import CPU, use_providers
+
+        use_providers(self.model.model.session, compute or CPU, f"KittenTTS {k.model}")
         voices = list(getattr(self.model, "available_voices", []) or [])
         inner = getattr(self.model, "model", None)
         raw = list(getattr(inner, "available_voices", []) or [])
@@ -434,9 +445,9 @@ def _run(cmd, stdin: bytes, timeout_s: float, shell: bool) -> bytes:
     return p.stdout
 
 
-def make_backend(cfg: TtsConfig) -> TtsBackend:
+def make_backend(cfg: TtsConfig, compute=None) -> TtsBackend:
     if cfg.backend == "kitten":
-        return KittenBackend(cfg)
+        return KittenBackend(cfg, compute)
     if cfg.backend == "piper":
         return PiperBackend(cfg)
     if cfg.backend == "command":

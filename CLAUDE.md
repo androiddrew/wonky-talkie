@@ -15,17 +15,15 @@ README.md (setup, tuning) and PROTOCOL.md (event/command contract, v3) are the u
 ## Run / test
 
 ```bash
-make system-deps && make setup          # the whole install; refuses outside an active venv
-make doctor                             # imports + system libs + models, changes nothing
-# or by hand:
-sudo apt install libportaudio2 libspeexdsp1 espeak-ng
-pip install -r requirements-desktop.txt && pip install --no-deps openwakeword   # tflite dep has no py3.12 wheel
-pip install https://github.com/KittenML/KittenTTS/releases/download/0.8.1/kittentts-0.8.1-py3-none-any.whl
-python scripts/download_models.py                      # openWakeWord ONNX models
+make system-deps && make setup          # picks setup-cpu or setup-gpu; refuses outside a venv
+make setup-cpu | make setup-gpu         # choose explicitly; either can be run over the other
+make doctor                             # onnxruntime build, resolved device, libs, models
+make docker-cpu && make docker-cuda     # the two images; make docker-sources lists host mics
+make docker-run-cuda PULSE_SOURCE=<mic> # run one on the host's mic + speakers
 python -m wonky_talkie -c configs/desktop.toml --say "Testing one two."   # TTS on its own
 python -m wonky_talkie -c configs/desktop.toml --print-events
 python examples/agent_client.py                        # sends `say`; no audio code in the agent
-python -m unittest discover -s tests -v                # 72 tests; AEC tests skip without libspeexdsp
+python -m unittest discover -s tests -v                # 98 tests; AEC tests skip without libspeexdsp
 ```
 
 **KittenTTS installs on 3.13 but needs constraints.** A plain `pip install <wheel>` fails with
@@ -46,6 +44,15 @@ No-hardware checks:
 
 ## Layout
 
+- `compute.py`: CPU or CUDA, decided once per process by `resolve(compute.device)`. `auto`
+  = CUDA iff onnxruntime has the CUDA provider (i.e. the GPU install) AND the driver reports a
+  device (ctypes `cuDeviceGetCount`, no toolkit needed). `prepare()` calls
+  `ort.preload_dlls()`, which also lets CTranslate2 find the pip cuBLAS/cuDNN by name - verified
+  in the CUDA image, which has no system CUDA libraries at all. `use_providers()` sets and then
+  *checks* a session's provider, because ORT only warns when CUDA is unusable. Every model takes
+  a `compute=` argument: SileroVAD, OpenWakeWordDetector (feature models via `device="gpu"`, the
+  classifier heads via `set_providers` since the library pins them to CPU), KittenBackend
+  (`set_providers`), FasterWhisperBackend (device, plus `auto` model/precision).
 - `tts.py`: TTS backends (`kitten` KittenTTS/ONNX, `piper` binary, `command` shell command,
   `openai` HTTP `/v1/audio/speech`, `none`, `fake`) behind one `TtsBackend` Protocol, mirroring
   `stt.py`. `TtsService` synthesizes on one worker thread and feeds the `Player` directly:
@@ -75,6 +82,28 @@ No-hardware checks:
 
 ## Key decisions (and why)
 
+- **Two installs, one config.** The user's requirement: a CPU install that runs everything on
+  the CPU, and a GPU install that runs *everything it can* on CUDA - no per-model switches.
+  `[compute] device = "auto"` follows the install; `stt.faster_whisper.model/compute_type =
+  "auto"` pick large-v3-turbo/float16 on GPU and small.en/int8 on CPU (measured: large-v3-turbo
+  is 60 ms/utterance on the 4090 but 5.6 s on the CPU; small.en is 1.3 s). The old
+  `stt.faster_whisper.device` key raises a "moved to [compute] device" error (`config._MOVED`).
+- **One CUDA 12 stack.** `onnxruntime-gpu>=1.26,<1.27`: 1.27+ ships CUDA 13 wheels, which would
+  sit beside CTranslate2's CUDA 12 ones. CUDA 12 wheels run under the user's CUDA 13 driver.
+- **The onnxruntime trap.** faster-whisper depends on the CPU `onnxruntime`; both packages write
+  one `onnxruntime/` dir. A plain install of the GPU requirements leaves a mix that *lists*
+  onnxruntime-gpu and *runs* CPU-only (seen: version 1.30.0, CPU providers, the CUDA `.so` on
+  disk unused). `make onnx-runtime` uninstalls both and installs one; `make doctor` flags a mix.
+- **KittenTTS default is nano-0.8**, changed from mini-0.8: it is the only float Kitten model.
+  mini/micro/nano-int8 use `MatMulInteger`/`DynamicQuantizeLinear`, which have no CUDA kernel,
+  so on "CUDA" they still ran on the CPU (mini: 1.6x CPU vs 1.8x "GPU"). nano-0.8: 21x on CPU,
+  57x on the 4090; first sentence 240 ms / 110 ms vs mini's ~3 s. Quality is the trade.
+- **VAD on the GPU is slower** (0.38 vs 0.10 ms per 32 ms block: transfer overhead) but both are
+  <2 % of the budget, so the GPU install runs it there anyway per the user's rule.
+- **Docker audio goes through the host's Pulse socket** (PipeWire serves it): PortAudio -> ALSA
+  default -> `docker/asound.conf` -> pulse plugin -> `PULSE_SERVER`. **`PULSE_SOURCE` is
+  required in practice**: this desktop's default source is the speaker *monitor*; unset, the
+  container recorded rms 0.0 (deaf), with the mic named, 3438. `make docker-sources` lists them.
 - **openWakeWord for the trigger, Whisper after it.** A "contains keyword" check on Whisper
   output was considered and rejected: too costly always-on, and prone to false wakes.
 - **The utterance starts at the wake point** (−100 ms), so the wake phrase isn't
@@ -133,10 +162,16 @@ Verified in a sandbox with no audio hardware or model downloads:
   reply at 3.9 s of 6.9 s and capturing the user;
 - openWakeWord models load (`hey_jarvis`).
 
-**Not run yet:** live PortAudio duplex in a real room; KittenTTS through a real speaker or on
-aarch64 (spacy/thinc/blis wheels there are untested); `--say` (it needs an output device);
-openWakeWord actually firing on a spoken wake word; faster-whisper transcribing real audio
-(warmup only); a real whisper.cpp server; the Jetson.
+Verified 2026-09-30 on the desktop (and in both Docker images): real duplex audio through
+PipeWire from inside the containers (48 kHz, 64/96 ms), a `say` reply heard by the user through
+the real speakers; every model on CUDA with no system CUDA libs in the image; Whisper on real
+speech (GPU 55-91 ms, CPU small.en ~1.3 s); openWakeWord firing on real speech (hey_mycroft
+0.998, same on CPU and GPU); first real-room AEC readings, 3.5 and 3.9 dB ERLE on single 5 s
+replies (barely converged - not a tuned result).
+
+**Not run yet:** barge-in with a person talking over real speakers; the `--say` CLI path;
+KittenTTS on aarch64; a real whisper.cpp server; the Jetson; Docker without a desktop sound
+server.
 
 ## Where things stand / next steps
 
@@ -151,9 +186,16 @@ openWakeWord actually firing on a spoken wake word; faster-whisper transcribing 
   `tts.chunk_growth` (1.5, which must stay under the backend's realtime factor of ~1.6).
   Measured after: 5 chunks, first audio 2.8 s, 34.5 s of audio in 20.1 s, no gap.
   `tests/test_tts.py::ChunkPacing` asserts both properties against measured per-character rates.
-- The v3 rename + TTS work is uncommitted on `main` (the user committed the v2 work as
-  `72bb3e4 "Working test"` mid-session). The directory is still `~/experiments/voice-listener`;
-  only the package was renamed.
+- The rename + TTS work is committed (`aa5a2af` "Adding TTS" through `ac55593` "better chunking
+  for tts"). The CPU/GPU installs + Docker work (compute.py, requirements-{base,cpu,gpu}.txt,
+  Dockerfile, configs/docker.toml) are uncommitted. The directory is still
+  `~/experiments/voice-listener`.
+- **The repo `.venv` is the CPU install** (plain onnxruntime, plus CUDA 12 wheels left over for
+  CTranslate2). Under the new rules that means Whisper drops to small.en on the CPU next time
+  the service starts there. `make setup-gpu` in that venv restores GPU Whisper and puts the
+  ONNX models on the GPU too. A scratch GPU venv verified this; the repo venv was left alone.
+- `configs/desktop.toml` has `audio.device = "7"`, which on 2026-09-30 was PortAudio's `hdmi`
+  with 0 input channels (indices shift as devices come and go). Left as the user's setting.
 - First live test: run with `--print-events` and watch:
   - `excess_db` on `interruption_rejected`/`interruption_detected`: tune
     `barge_in.verify_min_excess_db`;

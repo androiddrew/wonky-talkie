@@ -77,6 +77,11 @@ speed = 1.0
 # url = "http://desktop.local:8880/v1/audio/speech"
 # voice = "alloy"
 
+[compute]
+# PyPI's aarch64 onnxruntime is the CPU build, so this resolves to the CPU here;
+# Whisper already runs on the GPU inside whisper.cpp.
+device = "auto"
+
 [server]
 host = "127.0.0.1"
 port = 8765

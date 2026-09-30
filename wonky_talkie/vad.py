@@ -17,14 +17,18 @@ class SileroVAD:
     dependency (which matters on Jetson, where torch wheels are a chore).
     """
 
-    def __init__(self, model_path: str, threads: int = 1):
+    def __init__(self, model_path: str, threads: int = 1, compute=None):
         import onnxruntime as ort
 
+        from .compute import CPU, use_providers
+
+        compute = compute or CPU
         opts = ort.SessionOptions()
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = threads
         self._sess = ort.InferenceSession(model_path, sess_options=opts,
-                                          providers=["CPUExecutionProvider"])
+                                          providers=compute.onnx_providers)
+        use_providers(self._sess, compute, "Silero VAD")
         self._sr = np.array(16000, dtype=np.int64)
         self.reset()
 

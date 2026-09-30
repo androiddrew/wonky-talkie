@@ -144,9 +144,12 @@ class BargeInConfig:
 
 @dataclass
 class FasterWhisperConfig:
-    model: str = "large-v3-turbo"
-    device: str = "cuda"
-    compute_type: str = "float16"
+    # "auto": large-v3-turbo on a GPU, small.en on a CPU (5.6 s vs 1.3 s per
+    # utterance on a desktop CPU). Any faster-whisper model name overrides it.
+    model: str = "auto"
+    # The device comes from [compute]. "auto" precision is float16 on a GPU and
+    # int8 on a CPU; set it (int8_float16, float32, ...) to override.
+    compute_type: str = "auto"
     beam_size: int = 5
     partial_beam_size: int = 1
     download_root: str = ""
@@ -193,8 +196,12 @@ class SttConfig:
 
 @dataclass
 class KittenTtsConfig:
-    # KittenML/kitten-tts-mini-0.8 (80 MB) | micro-0.8 (41) | nano-0.8 (56) | nano-0.8-int8 (25)
-    model: str = "KittenML/kitten-tts-mini-0.8"
+    # nano-0.8 is the only float model, so it is the only one a GPU can run: the
+    # others are int8-quantized with MatMulInteger, which has no CUDA kernel in
+    # ONNX Runtime. It is also the fastest on a CPU (measured here: 21x realtime
+    # against mini's 1.6x, whose dynamic quantization costs more than it saves).
+    # mini-0.8 (78 MB) and micro-0.8 (41) sound fuller but are ~3 s to first word.
+    model: str = "KittenML/kitten-tts-nano-0.8"
     # Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo, or a raw expr-voice-N-m/f.
     voice: str = "expr-voice-5-m"
     speed: float = 1.0
@@ -265,6 +272,14 @@ class TtsConfig:
 
 
 @dataclass
+class ComputeConfig:
+    # auto: CUDA when this is the GPU install (onnxruntime-gpu) and a GPU is
+    # visible, otherwise CPU. Every model follows it. "cpu" forces the CPU;
+    # "cuda" fails at startup rather than quietly running on the CPU.
+    device: str = "auto"
+
+
+@dataclass
 class ServerConfig:
     host: str = "127.0.0.1"
     port: int = 8765
@@ -292,6 +307,7 @@ class Config:
     barge_in: BargeInConfig = field(default_factory=BargeInConfig)
     stt: SttConfig = field(default_factory=SttConfig)
     tts: TtsConfig = field(default_factory=TtsConfig)
+    compute: ComputeConfig = field(default_factory=ComputeConfig)
     server: ServerConfig = field(default_factory=ServerConfig)
     debug: DebugConfig = field(default_factory=DebugConfig)
 
@@ -301,10 +317,19 @@ class Config:
         return path if path.is_absolute() else PACKAGE_ROOT / path
 
 
+# Keys that used to exist, and where their job went.
+_MOVED = {
+    "stt.faster_whisper.device": "[compute] device = \"auto\" | \"cpu\" | \"cuda\" (it now "
+                                 "applies to every model, not just Whisper)",
+}
+
+
 def _build(cls: type, data: dict[str, Any], where: str) -> Any:
     fields = {f.name: f for f in dataclasses.fields(cls)}
     kwargs: dict[str, Any] = {}
     for key, value in data.items():
+        if f"{where}{key}" in _MOVED:
+            raise ValueError(f"Config key '{where}{key}' has moved: use {_MOVED[where + key]}")
         if key not in fields:
             valid = ", ".join(sorted(fields))
             raise ValueError(f"Unknown config key '{where}{key}'. Valid keys here: {valid}")
@@ -336,6 +361,8 @@ def validate(cfg: Config) -> None:
         raise ValueError(f"tts.backend must be kitten, piper, command, openai or none, not {cfg.tts.backend!r}")
     if cfg.tts.max_chars < 1 or cfg.tts.first_chunk_chars < 1:
         raise ValueError("tts.max_chars and tts.first_chunk_chars must be >= 1")
+    if cfg.compute.device not in ("auto", "cpu", "cuda"):
+        raise ValueError(f"compute.device must be auto, cpu or cuda, not {cfg.compute.device!r}")
     if cfg.tts.chunk_growth < 1.0:
         raise ValueError("tts.chunk_growth must be >= 1.0 (chunks may not shrink)")
     bad = set(cfg.barge_in.triggers) - {"speech", "wake_word"}

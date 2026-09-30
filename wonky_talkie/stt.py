@@ -45,7 +45,10 @@ class SttBackend(Protocol):
 class FasterWhisperBackend:
     name = "faster_whisper"
 
-    def __init__(self, cfg: SttConfig):
+    def __init__(self, cfg: SttConfig, compute=None):
+        from .compute import CPU
+
+        compute = compute or CPU
         try:
             from faster_whisper import WhisperModel
         except ImportError as e:
@@ -53,11 +56,13 @@ class FasterWhisperBackend:
         fw = cfg.faster_whisper
         self.cfg = cfg
         self.fw = fw
-        log.info("Loading faster-whisper %s on %s (%s)", fw.model, fw.device, fw.compute_type)
+        model = compute.whisper_model(fw.model)
+        compute_type = compute.whisper_compute_type(fw.compute_type)
+        log.info("Loading faster-whisper %s on %s (%s)", model, compute.device, compute_type)
         self.model = WhisperModel(
-            fw.model,
-            device=fw.device,
-            compute_type=fw.compute_type,
+            model,
+            device=compute.device,
+            compute_type=compute_type,
             cpu_threads=fw.cpu_threads,
             download_root=fw.download_root or None,
         )
@@ -172,9 +177,9 @@ class FakeBackend:
         pass
 
 
-def make_backend(cfg: SttConfig) -> SttBackend:
+def make_backend(cfg: SttConfig, compute=None) -> SttBackend:
     if cfg.backend == "faster_whisper":
-        return FasterWhisperBackend(cfg)
+        return FasterWhisperBackend(cfg, compute)
     if cfg.backend == "whisper_cpp":
         return HttpBackend(cfg, "whisper_cpp")
     if cfg.backend == "openai":

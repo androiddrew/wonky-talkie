@@ -1,0 +1,19 @@
+# GPU install: every model runs on CUDA - wake word, VAD, TTS and Whisper.
+#   make setup-gpu      (recommended; also installs openWakeWord and KittenTTS)
+#
+# Needs only an NVIDIA driver for CUDA 12 or newer; a CUDA 13 driver is fine.
+# The CUDA 12 libraries come as pip wheels below, so no CUDA toolkit install is
+# needed, and NVIDIA drivers run older CUDA runtimes than their own.
+-r requirements-base.txt
+
+# 1.26 is the last release built against CUDA 12; 1.27+ switched to CUDA 13
+# wheels, which would install a second CUDA stack beside CTranslate2's.
+onnxruntime-gpu[cuda,cudnn]>=1.26,<1.27
+nvidia-cublas-cu12     # CTranslate2 (Whisper) loads cuBLAS by name
+
+# CAUTION, if installing by hand: faster-whisper depends on the CPU `onnxruntime`,
+# so pip installs it *too*, into the same onnxruntime/ directory. The result
+# claims to be onnxruntime-gpu and silently runs on the CPU. Afterwards run:
+#   pip uninstall -y onnxruntime onnxruntime-gpu
+#   pip install "onnxruntime-gpu[cuda,cudnn]>=1.26,<1.27"
+# (`make setup-gpu` does this for you.)

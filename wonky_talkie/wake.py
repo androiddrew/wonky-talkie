@@ -31,7 +31,7 @@ class WakeDetector(Protocol):
 
 class OpenWakeWordDetector:
     def __init__(self, models: list[str], auto_download: bool = True,
-                 melspec_model_path: str = "", embedding_model_path: str = ""):
+                 melspec_model_path: str = "", embedding_model_path: str = "", compute=None):
         try:
             import openwakeword
             from openwakeword.model import Model
@@ -50,7 +50,19 @@ class OpenWakeWordDetector:
             kwargs["melspec_model_path"] = melspec_model_path
         if embedding_model_path:
             kwargs["embedding_model_path"] = embedding_model_path
+        from .compute import CPU, use_providers
+
+        compute = compute or CPU
+        if compute.cuda:
+            kwargs["device"] = "gpu"  # the melspectrogram and embedding models
         self._model = Model(wakeword_models=list(models), inference_framework="onnx", **kwargs)
+        # openWakeWord pins each classifier head to the CPU whatever `device` says;
+        # set_providers rebuilds the session on ours.
+        for name, session in self._model.models.items():
+            use_providers(session, compute, f"openWakeWord {name}")
+        pre = self._model.preprocessor
+        use_providers(pre.melspec_model, compute, "openWakeWord melspectrogram")
+        use_providers(pre.embedding_model, compute, "openWakeWord embedding")
         self.names = list(self._model.models.keys())
         log.info("openWakeWord loaded: %s", ", ".join(self.names))
 

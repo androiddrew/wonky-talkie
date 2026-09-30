@@ -141,7 +141,8 @@ class Vad(unittest.TestCase):
 
 class ConfigFiles(unittest.TestCase):
     def test_shipped_profiles_load(self):
-        for name in ("desktop.toml", "jetson.toml"):
+        # Every shipped config, so a new one can't go stale unnoticed.
+        for name in sorted(q.name for q in (ROOT / "configs").glob("*.toml")):
             with self.subTest(name=name):
                 cfg = load_config(ROOT / "configs" / name)
                 self.assertTrue(cfg.wake.models)

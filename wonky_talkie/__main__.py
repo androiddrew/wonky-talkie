@@ -22,12 +22,12 @@ def _print_event(ev: dict) -> None:
     print(f"[{ev['t']:8.2f}] {ev['type']:<22} {json.dumps(fields, ensure_ascii=False)}", flush=True)
 
 
-def _say_once(cfg, text: str, make_tts_backend) -> int:
+def _say_once(cfg, text: str, make_tts_backend, compute=None) -> int:
     """--say: synthesize one line and play it with no mic, server or engine."""
     import numpy as np
     import sounddevice as sd
 
-    backend = make_tts_backend(cfg.tts)
+    backend = make_tts_backend(cfg.tts, compute)
     t0 = time.monotonic()
     pcm = backend.synth(text)
     dur = len(pcm) / backend.sample_rate
@@ -46,6 +46,8 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--host", help="override server.host")
     p.add_argument("--port", type=int, help="override server.port")
     p.add_argument("--device", help="override audio.device")
+    p.add_argument("--compute", choices=["auto", "cpu", "cuda"],
+                   help="override compute.device (where every model runs)")
     p.add_argument("--stt-backend", choices=["faster_whisper", "whisper_cpp", "openai", "none"],
                    help="override stt.backend")
     p.add_argument("--tts-backend", choices=["kitten", "piper", "command", "openai", "none"],
@@ -83,6 +85,8 @@ def main(argv: list[str] | None = None) -> int:
         cfg.audio.device = args.device
     if args.stt_backend:
         cfg.stt.backend = args.stt_backend
+    if args.compute:
+        cfg.compute.device = args.compute
     if args.tts_backend:
         cfg.tts.backend = args.tts_backend
     if args.voice:
@@ -100,6 +104,7 @@ def main(argv: list[str] | None = None) -> int:
     from .audio import DuplexSource, EchoRoom, FileSource, MicSource, Player
     from .engine import Engine
     from .server import EventServer
+    from .compute import prepare, resolve
     from .stt import make_backend
     from .tts import TtsService, make_backend as make_tts_backend
     from .vad import SileroVAD
@@ -109,18 +114,27 @@ def main(argv: list[str] | None = None) -> int:
     if not vad_path.exists():
         log.error("Silero VAD model not found at %s (see README: Models)", vad_path)
         return 2
-    vad = SileroVAD(str(vad_path), threads=cfg.vad.threads)
+    try:
+        compute = resolve(cfg.compute.device)
+    except RuntimeError as e:
+        log.error("%s", e)
+        return 2
+    prepare(compute)
+    log.info("Compute: %s (%s)", compute.device.upper(), compute.reason)
+
+    vad = SileroVAD(str(vad_path), threads=cfg.vad.threads, compute=compute)
 
     if args.wake_at:
         cfg.wake.enabled = True
         wake = ScriptedWakeDetector(args.wake_at)
     elif cfg.wake.enabled:
         wake = OpenWakeWordDetector(cfg.wake.models, cfg.wake.auto_download,
-                                    cfg.wake.melspec_model_path, cfg.wake.embedding_model_path)
+                                    cfg.wake.melspec_model_path, cfg.wake.embedding_model_path,
+                                    compute=compute)
     else:
         wake = NullWakeDetector()
 
-    stt = make_backend(cfg.stt)
+    stt = make_backend(cfg.stt, compute)
     t0 = time.monotonic()
     try:
         stt.warmup()
@@ -129,7 +143,7 @@ def main(argv: list[str] | None = None) -> int:
     log.info("STT backend %s ready in %.1fs", stt.name, time.monotonic() - t0)
 
     if args.say:
-        return _say_once(cfg, args.say, make_tts_backend)
+        return _say_once(cfg, args.say, make_tts_backend, compute)
 
     server_holder: dict = {}
 
@@ -177,7 +191,7 @@ def main(argv: list[str] | None = None) -> int:
     if player is not None and cfg.tts.backend != "none":
         t0 = time.monotonic()
         try:
-            tts_backend = make_tts_backend(cfg.tts)
+            tts_backend = make_tts_backend(cfg.tts, compute)
             if cfg.tts.warmup:
                 tts_backend.warmup()
             tts_service = TtsService(cfg.tts, tts_backend, player, emit=engine.post_event)

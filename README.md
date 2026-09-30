@@ -48,30 +48,94 @@ changes.
 
 The full event and command reference is in [PROTOCOL.md](PROTOCOL.md).
 
-## Quick start: desktop (RTX 4090, Ubuntu)
+## Install: CPU or GPU
+
+There are two installs, and the install is the only choice you make:
+
+| | every model runs on | needs |
+|---|---|---|
+| **CPU** | the CPU | nothing but the system packages |
+| **GPU** | an NVIDIA GPU | an NVIDIA driver for CUDA 12 or newer |
+
+"Every model" means all of them: the wake word, the VAD, the voice (KittenTTS)
+and Whisper. The config doesn't say which install it is: `[compute] device =
+"auto"` follows whatever is installed, so the same config works on both, and so
+do both Docker images (see [Docker](#docker)).
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 make system-deps      # apt: libportaudio2, libspeexdsp1, espeak-ng (uses sudo)
-make setup            # every Python dependency, plus the wake-word and voice models
+make setup            # CPU or GPU, chosen by whether an NVIDIA GPU is present
 make doctor           # check it without changing anything
 ```
 
-`make setup` refuses to run unless a virtualenv is active, so it cannot install
-into the system Python by accident. `make` on its own lists every target. The
-long way round, if you would rather not use make:
+`make setup-cpu` and `make setup-gpu` choose explicitly, and either can be run
+over the other in the same virtualenv to switch. `make setup*` refuses to run
+unless a virtualenv is active, so it cannot install into the system Python by
+accident. `make` on its own lists every target.
+
+`make doctor` says which you ended up with, and why:
+
+```
+onnxruntime   onnxruntime-gpu 1.26.0
+compute       CUDA - GPU install and a GPU is visible (1 device)
+```
+
+**A CUDA 13 driver is fine.** The GPU install brings the CUDA 12 libraries as
+pip wheels (no CUDA toolkit install needed), and NVIDIA drivers run older CUDA
+runtimes than their own. Everything is on one CUDA 12 stack on purpose:
+`onnxruntime-gpu` is pinned below 1.27 because 1.27 moved to CUDA 13 wheels,
+which would install a second CUDA stack beside Whisper's.
+
+What the GPU buys, measured on an RTX 4090 against the same desktop's CPU:
+
+| model | CPU install | GPU install |
+|---|---|---|
+| Whisper, per utterance | 1.3 s (`small.en`, int8) | **60 ms** (`large-v3-turbo`, float16) |
+| voice, first sentence ready | 240 ms (21× realtime) | **110 ms** (57× realtime) |
+| wake word, per 80 ms chunk | 1.5 ms | 1.2 ms |
+| VAD, per 32 ms block | 0.10 ms | 0.38 ms |
+
+Whisper is the one that matters, so `stt.faster_whisper.model = "auto"` picks
+by device: `large-v3-turbo` takes 5.6 s per utterance on the CPU, which is too
+slow to hold a conversation, so the CPU install uses `small.en` instead. Name a
+model to override it. The VAD is honestly slower on the GPU (it is tiny, and
+copying each block over costs more than the maths), but both numbers are under
+2 % of the time budget, so the GPU install runs it there anyway.
+
+<details>
+<summary>The long way round, without make</summary>
 
 ```bash
 sudo apt install libportaudio2 libspeexdsp1 espeak-ng
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements-desktop.txt
-pip install --no-deps openwakeword        # its Linux tflite dependency often has no wheel; we use ONNX
-python scripts/download_models.py         # hey_jarvis + feature models; checks Silero VAD
+pip install -r requirements-cpu.txt           # or requirements-gpu.txt
+pip install --no-deps openwakeword            # its Linux tflite dependency often has no wheel; we use ONNX
+python scripts/download_models.py             # hey_jarvis + feature models; checks Silero VAD
 ```
 
-**The voice.** The default backend is [KittenTTS](https://github.com/KittenML/KittenTTS)
-(a 15M-parameter ONNX model, CPU-only, 25–80 MB), which leaves the GPU to
-Whisper:
+**For the GPU install, one more step, and it matters.** faster-whisper depends
+on the CPU `onnxruntime`, so pip installs it alongside `onnxruntime-gpu`, and
+both write into the same `onnxruntime/` directory. The result lists
+`onnxruntime-gpu`, has the CUDA library on disk, and quietly runs everything on
+the CPU. Clear both out and reinstall the GPU one:
+
+```bash
+pip uninstall -y onnxruntime onnxruntime-gpu
+pip install "onnxruntime-gpu[cuda,cudnn]>=1.26,<1.27"
+```
+
+`make doctor` flags that mixed state if you ever end up in it.
+</details>
+
+**The voice.** The default backend is [KittenTTS](https://github.com/KittenML/KittenTTS),
+small ONNX models (25–80 MB). The default is `kitten-tts-nano-0.8`, because it
+is the only one of the four that is float: the others are int8-quantized with
+`MatMulInteger`, which ONNX Runtime has no CUDA kernel for, so on a GPU they run
+their heavy layers on the CPU anyway. It's also the fastest on a CPU (21×
+realtime, against `mini-0.8`'s 1.6×). `mini-0.8` sounds fuller, if you can
+spare ~3 s to the first word; set `tts.kitten.model`. `make setup` installs it
+all; by hand:
 
 ```bash
 sudo apt install espeak-ng                # phonemization; see the note below
@@ -114,14 +178,6 @@ command = "espeak-ng --stdout"
 python -m wonky_talkie -c configs/desktop.toml --tts-backend command --say "Testing."
 ```
 
-If faster-whisper complains about missing `libcublas` / `libcudnn`, install
-the CUDA 12 runtime libraries with pip (faster-whisper's README describes this),
-then set `LD_LIBRARY_PATH` as shown there:
-
-```bash
-pip install nvidia-cublas-cu12 nvidia-cudnn-cu12==9.*
-```
-
 **Try it without a mic first.** This feeds a recorded two-session conversation
 and simulates the wake word at the right moments, so only VAD and Whisper are
 exercised:
@@ -153,6 +209,103 @@ python examples/agent_client.py --tts-rate 22050 \
 Say "Hey Jarvis, turn on the lights". The stub agent asks "Which room?", and
 you answer without the wake word. Say "Hey Jarvis, tell me a story" and talk
 over it to interrupt.
+
+## Docker
+
+Two images from one `Dockerfile`, matching the two installs:
+
+| image | build | models run on | the host needs |
+|---|---|---|---|
+| `wonky-talkie:cpu` (1.4 GB) | `make docker-cpu` | the CPU | Docker |
+| `wonky-talkie:cuda` (4.6 GB) | `make docker-cuda` | an NVIDIA GPU | an NVIDIA driver for CUDA 12+ (CUDA 13 is fine) and the [NVIDIA Container Toolkit](https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/) |
+
+The CUDA image needs no CUDA toolkit on the host and has none of its own: the
+CUDA 12 libraries are pip wheels inside it, loaded at startup.
+
+### Your microphone and speakers
+
+A container has no sound card. wonky-talkie uses the host's through its sound
+server's socket: PulseAudio's, which PipeWire (the default on current Ubuntu,
+Fedora and Debian desktops) serves as well. Inside, PortAudio opens ALSA's
+default device, which the image routes to that socket.
+
+**First find your microphone.** Many desktops set the default input to a
+speaker *monitor* — a loopback of whatever is playing — and a container left on
+that hears its own voice and never you. On the machine this was tested on, the
+default input recorded silence while the real microphone was right beside it.
+List what the container can see:
+
+```bash
+make docker-sources
+```
+```
+sources (the default is marked *):
+  * alsa_output.pci-0000_08_00.4.analog-stereo.monitor     <- a loopback, not a mic
+    alsa_input.pci-0000_08_00.4.analog-stereo              <- the microphone
+```
+
+**Then run it**, naming the microphone:
+
+```bash
+make docker-run-cpu  PULSE_SOURCE=alsa_input.pci-0000_08_00.4.analog-stereo
+make docker-run-cuda PULSE_SOURCE=alsa_input.pci-0000_08_00.4.analog-stereo
+```
+
+which is:
+
+```bash
+docker run --rm -it --name wonky-talkie \
+  -v "$XDG_RUNTIME_DIR/pulse/native:/run/pulse/native" \
+  -e PULSE_SERVER=unix:/run/pulse/native \
+  -e PULSE_SOURCE=alsa_input.pci-0000_08_00.4.analog-stereo \
+  -p 8765:8765 \
+  -v wonky-talkie-models:/cache \
+  wonky-talkie:cpu                      # or: --gpus all ... wonky-talkie:cuda
+```
+
+| flag | what it's for |
+|---|---|
+| `-v $XDG_RUNTIME_DIR/pulse/native:/run/pulse/native` | the host sound server's socket: the microphone in, the speakers out |
+| `-e PULSE_SERVER=unix:/run/pulse/native` | tells the container's audio where that socket is |
+| `-e PULSE_SOURCE=<mic>` | which input to record; see above. `PULSE_SINK=<name>` picks the output the same way (the default is usually right) |
+| `-p 8765:8765` | the WebSocket your agent connects to (`ws://127.0.0.1:8765/`) |
+| `-v wonky-talkie-models:/cache` | Whisper downloads here on first start (`large-v3-turbo`, 1.6 GB, on the CUDA image; `small.en`, 464 MB, on the CPU image), so only once |
+| `--gpus all` | CUDA image only: hands it the GPU |
+
+On startup the log should say where the models run and that the audio opened:
+
+```
+Compute: CUDA (GPU install and a GPU is visible (1 device))
+Duplex audio: in 'default' / out 'default' at 48000 Hz, latency in 64 ms / out 96 ms
+```
+
+If the CUDA image says `Compute: CPU (no CUDA device is visible ...)`, it was
+started without `--gpus all`. The in + out latency must stay well under
+`aec.filter_ms` (250) for echo cancellation to work; through PipeWire it was
+160 ms here.
+
+**Check the speakers on their own** with `--say`; anything after the image
+name is passed to wonky-talkie:
+
+```bash
+make docker-run-cpu PULSE_SOURCE=... ARGS='--say "Hello from the container."'
+```
+
+Then point an agent at it from the host as usual: `python examples/agent_client.py`.
+
+Other things worth knowing:
+
+- **Your own config:** mount it over the baked-in one,
+  `-v ./my.toml:/app/configs/docker.toml:ro`.
+- **Plain PulseAudio** (not PipeWire) also wants its auth cookie:
+  `-v ~/.config/pulse/cookie:/root/.config/pulse/cookie:ro`.
+- **Checking the connection:** `docker run --rm -v "$XDG_RUNTIME_DIR/pulse/native:/run/pulse/native"
+  -e PULSE_SERVER=unix:/run/pulse/native --entrypoint pactl wonky-talkie:cpu info`
+  should print your sound server's name.
+- **Headless machines** without a desktop sound server: not tested. Passing the
+  card with `--device /dev/snd` would also need the image's ALSA routing
+  (`/etc/asound.conf`, which sends everything to PulseAudio) replaced, and the
+  container would then own the card exclusively.
 
 ## Jetson Orin (JetPack 7.2)
 
@@ -280,12 +433,15 @@ removed). Watch them with `--print-events` while you tune.
 | `session.followup_timeout_s` | 8 | default follow-up window |
 | `stt.initial_prompt`, `stt.faster_whisper.hotwords` | | bias Whisper toward names and jargon |
 | `stt.drop_phrases` | "thank you", ... | Whisper's classic silence hallucinations, dropped when they're the whole transcript |
+| `compute.device` | `auto` | `auto` follows the install (GPU install → CUDA). `cpu` forces the CPU; `cuda` refuses to start without one, rather than quietly running on the CPU. `--compute` overrides it for one run |
+| `stt.faster_whisper.model` | `auto` | `large-v3-turbo` on a GPU, `small.en` on a CPU; any faster-whisper model name overrides it |
+| `stt.faster_whisper.compute_type` | `auto` | `float16` on a GPU, `int8` on a CPU |
 | `tts.backend` | `kitten` | `kitten` \| `piper` \| `command` \| `openai` \| `none` |
 | `tts.first_chunk_chars` | 48 | how much is *packed* into the first chunk: this is your reply latency. A single sentence longer than it still goes out whole — breaking mid-sentence makes KittenTTS stumble, because it appends a comma to any chunk without terminal punctuation |
 | `tts.max_chars` | 320 | ceiling for later chunks; larger sounds smoother, costs more on an interruption |
 | `tts.chunk_growth` | 1.5 | how much each chunk may grow over the last. **Must stay below the backend's realtime factor** (KittenTTS measures ~1.6×) or the speaker runs dry mid-reply while a big chunk is still synthesizing. Lower it if you hear gaps |
 | `tts.kitten.voice` | `expr-voice-5-m` | or Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo |
-| `tts.kitten.model` | `…mini-0.8` | `micro-0.8` (41 MB), `nano-0.8` (56), `nano-0.8-int8` (25) are smaller and faster |
+| `tts.kitten.model` | `…nano-0.8` | the only float model, so the only one a GPU can run, and the fastest on a CPU too. `mini-0.8` (78 MB) and `micro-0.8` (41) sound fuller but are int8 and CPU-bound, ~3 s to the first word |
 | `tts.kitten.speed` | 1.0 | speech rate multiplier |
 | `tts.warmup` | true | synthesize once at startup so the first real reply isn't slow |
 | `debug.save_audio_dir` | | save every utterance as WAV; useful for tuning |
@@ -304,7 +460,7 @@ pip install websockets     # plus the base requirements; libspeexdsp1 for the AE
 python -m unittest discover -s tests -v
 ```
 
-The 72 tests drive the real state machine with real speech clips and the real
+The 98 tests drive the real state machine with real speech clips and the real
 Silero VAD:
 
 - wake → command in one breath or with a pause
@@ -326,42 +482,46 @@ Silero VAD:
   subprocess, a spoken reply driving the state machine, and the two properties
   that matter most — a barge-in must stop *synthesis* and not just the speaker,
   and a failing backend must still close the playback item
+- compute: CPU vs CUDA resolution for every combination of install and GPU, that
+  asking for CUDA without one refuses to start instead of falling back, and that
+  a session which quietly lands on the CPU is reported
 
 ## Status: what has and hasn't been run
 
-Verified in a sandbox without audio hardware or model downloads:
+Verified on the development desktop (RTX 4090, driver 595 / CUDA 13.2, PipeWire
+1.0.5), in both installs and both Docker images:
 
-- the engine with real speech and Silero VAD
-- echo cancellation with SpeexDSP (built from source here; the system
-  `libspeexdsp1` exposes the same API) in a simulated echoing room
-- the WebSocket server
-- the HTTP STT client
-- the CLI running end to end with `--simulate-echo` against
-  `examples/agent_client.py` streaming TTS audio (clarifying question plus
-  barge-in), with a stand-in whisper.cpp server
-- KittenTTS itself, in the project venv on **Python 3.13.4**: model load in 1.4 s,
-  synthesis to 24 kHz int16 at ~1.6–1.7× real time, all eight voices listed, and
-  the espeak-ng workaround above. faster-whisper still warms up on CUDA
-  afterwards and all 72 tests still pass, so the added packages disturb nothing
-- `say` over a real WebSocket with the `command` backend (espeak-ng): first audio
-  31 ms after the command, and a real barge-in cutting the synthesized reply off
-  at 3.9 s of 6.9 s with `excess_db` 22.3
-- the openWakeWord models load (`hey_jarvis`)
+- **real audio, live:** full-duplex through PipeWire at 48 kHz (64 ms in, 96 ms
+  out), from inside the containers. An agent on the host sent `say`, and the
+  reply came out of the real speakers and was heard in the room.
+- **every model on the GPU** in the GPU install and CUDA image, with no CUDA
+  toolkit on the host or in the image: the pip CUDA 12 wheels under a CUDA 13
+  driver. No session fell back to the CPU.
+- **Whisper transcribing real speech:** `large-v3-turbo` in 55–91 ms per
+  utterance on the GPU; `small.en` in ~1.3 s and `large-v3-turbo` in ~5.6 s on
+  the CPU.
+- **openWakeWord firing on real speech:** `hey_mycroft` in openWakeWord's own
+  test recording, score 0.998, identically on CPU and GPU.
+- **echo cancellation in a real room**, first readings: 3.5 and 3.9 dB of echo
+  removed over single 5 s replies. That's only just past Speex's ~1–1.5 s
+  convergence, so treat it as a first data point, not a tuned result.
+- the engine with real speech clips and real Silero VAD; SpeexDSP in a simulated
+  echoing room; the WebSocket protocol; the HTTP STT client against a
+  whisper.cpp stand-in; `say` with a real barge-in (`excess_db` 22.3, cutting a
+  reply at 3.9 s of 6.9 s); KittenTTS on Python 3.12 and 3.13.
 
 Not run yet:
 
-- live duplex audio through PortAudio: a real room, speaker and mic (the echo
-  numbers above are from a simulated room)
-- KittenTTS through a real speaker, and `--say` (it needs an output device)
-- KittenTTS on the Jetson (aarch64 wheels for spacy/thinc/blis are untested here)
-- openWakeWord actually firing on a spoken wake word (the scripted `--wake-at`
-  detector stood in)
-- faster-whisper inference
-- a real whisper.cpp server
-- a Jetson
+- **barge-in in a real room**: nobody has talked over a reply through real
+  speakers yet; the numbers above are from the simulated room and recordings
+- the `--say` CLI path itself (`say` over the WebSocket is what was tested)
+- the Jetson: KittenTTS on aarch64 (spacy/thinc/blis wheels there are
+  untested), a real whisper.cpp server, and the board itself
+- Docker on a headless machine without a desktop sound server
 
-The first run on your machine should be `scripts/download_models.py`, then the
-demo-stream command above, then the live mic.
+The first run on a new machine: `make setup`, `make doctor`, `make demo`, then
+the live mic (or the Docker equivalents: `make docker-sources`, then
+`make docker-run-cpu PULSE_SOURCE=...`).
 
 ## Layout
 
@@ -376,8 +536,11 @@ wonky_talkie/
   stt.py        faster-whisper, whisper.cpp HTTP, OpenAI-compatible HTTP
   tts.py        KittenTTS, piper, any shell command, OpenAI-compatible HTTP; sentence streaming
   textutil.py   wake-phrase stripping, hallucination filter
+  compute.py    CPU or CUDA, decided once from what's installed; puts every model there
   config.py     TOML config with defaults and validation
-configs/        desktop.toml, jetson.toml
+configs/        desktop.toml, jetson.toml, docker.toml (baked into both images)
+Dockerfile      both images (--build-arg PROFILE=cpu|gpu); docker/asound.conf routes ALSA to Pulse
+requirements-*  base (shared), cpu, gpu, jetson
 examples/       agent_client.py
 scripts/        download_models.py, make_demo_stream.py, pipewire/60-echo-cancel.conf
 models/         silero_vad.onnx (MIT, from snakers4/silero-vad)

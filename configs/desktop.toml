@@ -42,9 +42,8 @@ partials = true                     # cheap on a 4090
 partial_interval_ms = 500
 
 [stt.faster_whisper]
-model = "large-v3-turbo"
-device = "cuda"
-compute_type = "float16"
+model = "auto"                       # large-v3-turbo on a GPU, small.en on a CPU
+compute_type = "auto"                # float16 on a GPU, int8 on a CPU
 beam_size = 5
 hotwords = ""                        # e.g. "Jarvis Kubernetes Grafana"
 
@@ -58,10 +57,13 @@ max_chars = 320
 warmup = true
 
 [tts.kitten]
-model = "KittenML/kitten-tts-mini-0.8"   # micro-0.8 / nano-0.8 / nano-0.8-int8 are smaller
+# nano-0.8 is the only float model, so the only one a GPU can run, and the fastest
+# on a CPU too (measured: first sentence in 0.1 s on the 4090, 0.24 s on the CPU).
+# mini-0.8 sounds fuller but is int8, CPU-bound, and ~3 s to the first word.
+model = "KittenML/kitten-tts-nano-0.8"
 # Bella=expr-voice-2-f  Jasper=expr-voice-2-m  Luna=expr-voice-3-f  Bruno=expr-voice-3-m
 # Rosie=expr-voice-4-f  Hugo=expr-voice-4-m     Kiki=expr-voice-5-f  Leo=expr-voice-5-m
-voice = "expr-voice-4-m"                 # = Leo. Either spelling works.
+voice = "expr-voice-4-m"                 # = Hugo. Either spelling works.
 speed = 1.2                              # 0.8 slower / 1.2 faster
 
 # No-dependency fallback if KittenTTS won't install (e.g. on Python 3.13):
@@ -69,6 +71,11 @@ speed = 1.2                              # 0.8 slower / 1.2 faster
 # backend = "command"
 # [tts.command]
 # command = "espeak-ng --stdout"
+
+[compute]
+# auto = the install decides: the GPU install runs every model on CUDA, the CPU
+# install on the CPU. "cpu" forces the CPU; "cuda" refuses to start without one.
+device = "auto"
 
 [server]
 host = "127.0.0.1"                   # 0.0.0.0 to accept agents from other machines (set a token)
