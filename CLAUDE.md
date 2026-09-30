@@ -142,10 +142,15 @@ openWakeWord actually firing on a spoken wake word; faster-whisper transcribing 
 
 - `[barge_in] triggers` in `configs/desktop.toml` was checked and already includes `"speech"`;
   that old workaround is gone.
-- `tts.first_chunk_chars` defaults to 48, not 120: the first chunk is reply latency, and
-  KittenTTS costs ~0.07 s per character here, so 120 meant ~8 s of silence before the first
-  word. `split_sentences` hard-bounds the first chunk (breaking at a clause boundary, then a
-  space) - an earlier version let a long opening sentence through whole.
+- **Chunking is pacing, not just splitting.** Two bugs the user heard in the example agent's
+  story reply: (1) the first chunk was cut mid-clause at "...that never", and KittenTTS appends
+  a comma to any chunk lacking terminal punctuation, so it was *spoken* as a stumble; (2) chunk
+  sizes leapt 48 -> 274 chars, and a 274-char chunk needs ~17 s to synthesize while only 4.8 s
+  of audio was queued, so the speaker went silent for ~12 s mid-story. `split_sentences` now
+  breaks only on sentence -> clause -> (run-ons only) word boundaries, and ramps chunk sizes by
+  `tts.chunk_growth` (1.5, which must stay under the backend's realtime factor of ~1.6).
+  Measured after: 5 chunks, first audio 2.8 s, 34.5 s of audio in 20.1 s, no gap.
+  `tests/test_tts.py::ChunkPacing` asserts both properties against measured per-character rates.
 - The v3 rename + TTS work is uncommitted on `main` (the user committed the v2 work as
   `72bb3e4 "Working test"` mid-session). The directory is still `~/experiments/voice-listener`;
   only the package was renamed.

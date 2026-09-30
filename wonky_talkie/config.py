@@ -246,8 +246,15 @@ class TtsConfig:
     # the speaker sooner and an interruption wastes less work. The first chunk is
     # your reply latency: measured against KittenTTS (~0.07 s per character on a
     # desktop CPU), 48 characters is about 1.5 s before the first word is heard.
+    # It bounds how much is *packed* into the first chunk; a single sentence
+    # longer than this still goes out whole, because breaking mid-sentence makes
+    # KittenTTS stumble (it appends a comma to an unpunctuated chunk).
     first_chunk_chars: int = 48
     max_chars: int = 320
+    # Each chunk may be this much larger than the last, up to max_chars. It must
+    # stay below the backend's realtime factor or the speaker runs dry mid-reply
+    # while a big chunk is still being synthesized. KittenTTS measures ~1.6x.
+    chunk_growth: float = 1.5
     # Synthesize one warmup utterance at startup (loads the model, JITs the ONNX
     # graph) so the first real reply isn't slow.
     warmup: bool = True
@@ -329,6 +336,8 @@ def validate(cfg: Config) -> None:
         raise ValueError(f"tts.backend must be kitten, piper, command, openai or none, not {cfg.tts.backend!r}")
     if cfg.tts.max_chars < 1 or cfg.tts.first_chunk_chars < 1:
         raise ValueError("tts.max_chars and tts.first_chunk_chars must be >= 1")
+    if cfg.tts.chunk_growth < 1.0:
+        raise ValueError("tts.chunk_growth must be >= 1.0 (chunks may not shrink)")
     bad = set(cfg.barge_in.triggers) - {"speech", "wake_word"}
     if bad:
         raise ValueError(f"barge_in.triggers has unknown entries: {sorted(bad)}")

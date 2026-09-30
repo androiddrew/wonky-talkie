@@ -52,6 +52,71 @@ class Splitting(unittest.TestCase):
         self.assertEqual(chunks[0], "Are you there?")
 
 
+class ChunkPacing(unittest.TestCase):
+    """The two properties that make a long reply sound continuous."""
+
+    # The example agent's story, which is what exposed both bugs.
+    STORY = ("Once upon a time there was a listener that never slept. It heard every "
+             "word, but it only paid attention when someone called its name. ") * 3
+
+    def test_never_breaks_mid_clause(self):
+        """KittenTTS appends a comma to an unpunctuated chunk, so a chunk that
+        ends mid-clause is spoken as a stumble ("...that never,")."""
+        for chunk in split_sentences(self.STORY, 320, 48):
+            self.assertRegex(chunk, r"[.!?,;:\u2026]$",
+                             f"chunk ends mid-clause: {chunk!r}")
+
+    def test_chunks_ramp_so_playback_never_starves(self):
+        """Each chunk must synthesize faster than the queued audio plays out.
+
+        Modelled with this machine's measured KittenTTS rates: 0.062 s of work
+        and 0.100 s of audio per character (~1.6x realtime).
+        """
+        synth_per_char, audio_per_char = 0.062, 0.100
+        chunks = split_sentences(self.STORY, 320, 48)
+        self.assertGreater(len(chunks), 2)
+        # Chunk k is ready at sum(synth[0..k]); audio lasts until
+        # synth[0] + sum(audio[0..k-1]). Cancelling synth[0] (that is latency,
+        # not a gap) leaves: sum(synth[1..k]) <= sum(audio[0..k-1]).
+        cum_synth = cum_audio = 0.0
+        for i, c in enumerate(chunks):
+            if i:
+                cum_synth += synth_per_char * len(c)
+                self.assertLessEqual(
+                    round(cum_synth, 6), round(cum_audio, 6),
+                    f"chunk {i} ({len(c)} chars) starves playback")
+            cum_audio += audio_per_char * len(c)
+
+    def test_chunk_sizes_do_not_leap(self):
+        chunks = split_sentences("word " * 400, max_chars=320, first_max_chars=48,
+                                 growth=1.5)
+        for prev, nxt in zip(chunks, chunks[1:]):
+            self.assertLessEqual(len(nxt), max(320, int(len(prev) * 1.5) + 40),
+                                 f"{len(prev)} -> {len(nxt)} is too big a jump")
+
+    def test_growth_of_one_keeps_every_chunk_small(self):
+        chunks = split_sentences(self.STORY, 320, 48, growth=1.0)
+        self.assertTrue(all(len(c) <= 130 for c in chunks), [len(c) for c in chunks])
+
+    def test_a_run_on_with_no_punctuation_is_still_wrapped(self):
+        text = "word " * 200  # no sentence or clause boundary anywhere
+        chunks = split_sentences(text, max_chars=100, first_max_chars=48)
+        self.assertTrue(all(len(c) <= 100 for c in chunks), [len(c) for c in chunks])
+        self.assertEqual(" ".join(chunks).split(), text.split())
+
+    def test_nothing_is_lost_or_duplicated(self):
+        for fmc in (10, 48, 120):
+            chunks = split_sentences(self.STORY, 320, fmc)
+            self.assertEqual(" ".join(chunks).split(), self.STORY.split(), fmc)
+
+    def test_growth_below_one_is_rejected(self):
+        from wonky_talkie.config import Config, validate
+        cfg = Config()
+        cfg.tts.chunk_growth = 0.9
+        with self.assertRaises(ValueError):
+            validate(cfg)
+
+
 class Conversions(unittest.TestCase):
     def test_float_to_int16(self):
         out = _to_int16(np.array([0.0, 1.0, -1.0, 2.0], dtype=np.float32))

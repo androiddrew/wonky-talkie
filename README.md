@@ -281,16 +281,20 @@ removed). Watch them with `--print-events` while you tune.
 | `stt.initial_prompt`, `stt.faster_whisper.hotwords` | | bias Whisper toward names and jargon |
 | `stt.drop_phrases` | "thank you", ... | Whisper's classic silence hallucinations, dropped when they're the whole transcript |
 | `tts.backend` | `kitten` | `kitten` \| `piper` \| `command` \| `openai` \| `none` |
-| `tts.first_chunk_chars` | 120 | how much is synthesized before speaking starts: this is your reply latency. Lower = starts sooner, more chunk seams |
-| `tts.max_chars` | 320 | size of later chunks; larger sounds smoother, costs more on an interruption |
+| `tts.first_chunk_chars` | 48 | how much is *packed* into the first chunk: this is your reply latency. A single sentence longer than it still goes out whole — breaking mid-sentence makes KittenTTS stumble, because it appends a comma to any chunk without terminal punctuation |
+| `tts.max_chars` | 320 | ceiling for later chunks; larger sounds smoother, costs more on an interruption |
+| `tts.chunk_growth` | 1.5 | how much each chunk may grow over the last. **Must stay below the backend's realtime factor** (KittenTTS measures ~1.6×) or the speaker runs dry mid-reply while a big chunk is still synthesizing. Lower it if you hear gaps |
 | `tts.kitten.voice` | `expr-voice-5-m` | or Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo |
 | `tts.kitten.model` | `…mini-0.8` | `micro-0.8` (41 MB), `nano-0.8` (56), `nano-0.8-int8` (25) are smaller and faster |
 | `tts.kitten.speed` | 1.0 | speech rate multiplier |
 | `tts.warmup` | true | synthesize once at startup so the first real reply isn't slow |
 | `debug.save_audio_dir` | | save every utterance as WAV; useful for tuning |
 
-The startup log reports how fast the backend is relative to real time; anything
-above ~1.5× keeps comfortably ahead of playback. `--say TEXT` synthesizes one
+Chunks start small and ramp up, because a long reply has two competing needs:
+the first word should arrive quickly, but every later chunk must be
+synthesizable in less time than the already-queued audio takes to play. The
+`tts` log lines report both — `first audio in N ms` and the realtime factor —
+and anything above ~1.5× keeps comfortably ahead of playback. `--say TEXT` synthesizes one
 line and exits, which is the quickest way to check a voice or a new backend.
 
 ## Tests

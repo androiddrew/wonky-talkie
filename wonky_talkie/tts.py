@@ -88,70 +88,85 @@ def decode_audio(data: bytes, fallback_rate: int) -> tuple[np.ndarray, int]:
     return np.frombuffer(data[: len(data) // 2 * 2], dtype="<i2"), fallback_rate
 
 
-def split_sentences(text: str, max_chars: int, first_max_chars: int) -> list[str]:
-    """Break text into speakable chunks, the first one deliberately short.
+_SENTENCE_END = re.compile(r"(?<=[.!?\u2026])\s+")
+_CLAUSE_END = re.compile(r"(?<=[,;:])\s+")
 
-    The first chunk sets reply latency: nothing is audible until it is
-    synthesized, so it is held to `first_max_chars` even when that means
-    cutting mid-sentence. Sentences are kept whole where they fit; anything
-    longer is broken at a clause boundary (comma, semicolon, colon) and only
-    then at a space.
+
+def split_sentences(text: str, max_chars: int, first_max_chars: int,
+                    growth: float = 1.5) -> list[str]:
+    """Break text into speakable chunks that playback can keep up with.
+
+    Two rules, both learned the hard way:
+
+    Only break where speech naturally pauses - a sentence end, else a clause
+    (comma, semicolon, colon), and mid-clause only for a run-on longer than
+    `max_chars`. KittenTTS appends a comma to any chunk that does not end in
+    punctuation, so a chunk cut mid-clause is *spoken* as a stumble.
+
+    Grow the chunks. The first is small so the first word comes quickly, but
+    each chunk must be synthesizable in less time than the already-queued audio
+    takes to play, or the speaker runs dry mid-reply. Synthesis produces
+    `rtf` seconds of audio per second of work, so sizes may grow by up to `rtf`
+    each step; the 1.5 default sits just under KittenTTS' measured ~1.6.
     """
     text = " ".join(text.split())
     if not text:
         return []
-    queue = [s for s in re.split(r"(?<=[.!?\u2026])\s+", text) if s]
+    limit = max(1, max_chars)
+    budget = max(1, min(first_max_chars, limit))
     chunks: list[str] = []
     pending = ""
-    budget = max(1, first_max_chars)
 
     def flush() -> None:
         nonlocal pending, budget
         if pending:
             chunks.append(pending)
             pending = ""
-            budget = max(1, max_chars)
+            budget = max(1, min(limit, int(budget * growth)))
 
-    while queue:
-        unit = queue.pop(0)
-        if len(unit) > budget:
-            if pending:  # close what we have, then retry with a full budget
-                queue.insert(0, unit)
-                flush()
-                continue
-            head, tail = _split_at(unit, budget)
-            pending = head
-            flush()
-            if tail:
-                queue.insert(0, tail)
-            continue
+    for atom in _atoms(text, limit):
         if not pending:
-            pending = unit
-        elif len(pending) + 1 + len(unit) <= budget:
-            pending = f"{pending} {unit}"
+            pending = atom
+        elif len(pending) + 1 + len(atom) <= budget:
+            pending = f"{pending} {atom}"
         else:
-            queue.insert(0, unit)
             flush()
-            continue
+            pending = atom
         if len(pending) >= budget:
             flush()
     flush()
     return chunks
 
 
-def _split_at(text: str, limit: int) -> tuple[str, str]:
-    """Split `text` so the head is at most `limit`, on the latest clean break."""
-    if len(text) <= limit:
-        return text, ""
-    window = text[: limit + 1]
-    cut = max(window.rfind(", "), window.rfind("; "), window.rfind(": "))
-    if cut > 0:
-        cut += 1  # keep the punctuation with the head
-    else:
-        cut = window.rfind(" ")
-    if cut <= 0:
-        cut = limit  # one enormous word
-    return text[:cut].rstrip(), text[cut:].lstrip()
+def _atoms(text: str, max_chars: int):
+    """Yield the smallest pieces we are willing to end a chunk on."""
+    for sentence in _SENTENCE_END.split(text):
+        if not sentence:
+            continue
+        if len(sentence) <= max_chars:
+            yield sentence
+            continue
+        for clause in _CLAUSE_END.split(sentence):
+            if not clause:
+                continue
+            if len(clause) <= max_chars:
+                yield clause
+            else:  # a run-on with no punctuation to hide behind
+                yield from _wrap_words(clause, max_chars)
+
+
+def _wrap_words(text: str, limit: int) -> list[str]:
+    out: list[str] = []
+    current = ""
+    for word in text.split(" "):
+        if current and len(current) + 1 + len(word) > limit:
+            out.append(current)
+            current = word
+        else:
+            current = f"{current} {word}" if current else word
+    if current:
+        out.append(current)
+    return out
 
 
 def _ensure_espeak(preference: str = "") -> str | None:
@@ -461,7 +476,8 @@ class TtsService:
             client: str | None = None, playback_id: str | None = None) -> str:
         """Queue text for synthesis and playback. Returns the playback id."""
         pid = playback_id or f"pb_{uuid.uuid4().hex[:8]}"
-        chunks = split_sentences(text, self.cfg.max_chars, self.cfg.first_chunk_chars)
+        chunks = split_sentences(text, self.cfg.max_chars, self.cfg.first_chunk_chars,
+                                 self.cfg.chunk_growth)
         self.player.start_item(pid, self.backend.sample_rate, text, then, timeout_s, client)
         with self._lock:
             self._futures[pid] = self._pool.submit(self._work, pid, chunks, client)
