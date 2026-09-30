@@ -52,14 +52,17 @@ hotwords = ""                        # e.g. "Jarvis Kubernetes Grafana"
 # wonky-talkie speaks: the agent sends `say` with text and we synthesize it.
 # kitten | piper | command | openai | none ("none" = agents must send `play`)
 backend = "kitten"
-first_chunk_chars = 120              # keep the first sentence short: it sets reply latency
+first_chunk_chars = 48               # this IS your reply latency: kitten costs ~0.07 s/char here,
+                                     # so 48 chars is ~1 s before the first word is audible
 max_chars = 320
 warmup = true
 
 [tts.kitten]
 model = "KittenML/kitten-tts-mini-0.8"   # micro-0.8 / nano-0.8 / nano-0.8-int8 are smaller
-voice = "expr-voice-5-m"                 # or Bella, Jasper, Luna, Bruno, Rosie, Hugo, Kiki, Leo
-speed = 1.0
+# Bella=expr-voice-2-f  Jasper=expr-voice-2-m  Luna=expr-voice-3-f  Bruno=expr-voice-3-m
+# Rosie=expr-voice-4-f  Hugo=expr-voice-4-m     Kiki=expr-voice-5-f  Leo=expr-voice-5-m
+voice = "expr-voice-4-m"                 # = Leo. Either spelling works.
+speed = 1.2                              # 0.8 slower / 1.2 faster
 
 # No-dependency fallback if KittenTTS won't install (e.g. on Python 3.13):
 # [tts]

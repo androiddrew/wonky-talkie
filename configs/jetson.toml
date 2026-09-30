@@ -59,13 +59,14 @@ timeout_s = 30
 # KittenTTS is CPU-only and small, so it costs the Orin almost nothing and
 # leaves the GPU to whisper.cpp.
 backend = "kitten"
-first_chunk_chars = 100              # a little shorter: the Orin synthesizes slower
+first_chunk_chars = 40               # reply latency; shorter than the desktop because the
+                                     # Orin synthesizes more slowly
 max_chars = 280
 warmup = true
 
 [tts.kitten]
 model = "KittenML/kitten-tts-nano-0.8"   # 56 MB; mini-0.8 sounds better if you have room
-voice = "expr-voice-5-m"
+voice = "expr-voice-5-m"                 # = Leo; see configs/desktop.toml for the full list
 speed = 1.0
 
 # Alternative: borrow the desktop's voice (Jetson as a "satellite"), matching
