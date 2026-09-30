@@ -1,7 +1,7 @@
 [project]
 name = "wonky-talkie"
 version = "0.1.0"
-description = "Always-on voice I/O for an agent: wake word, utterance capture, Whisper transcription and speech synthesis, published as events to agent clients over WebSocket"
+description = "Think of it as a walkie talkie for a agent. A service that allows an agent to listen and verbally respond to a user."
 requires-python = ">=3.11"
 dependencies = [
   "numpy",
